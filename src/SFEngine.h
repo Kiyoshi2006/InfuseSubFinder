@@ -5,6 +5,7 @@
 extern "C" {
 #endif
 void SFLog(NSString *format, ...) NS_FORMAT_FUNCTION(1, 2);
+void SFToast(NSString *text);  // thong bao nho tren man hinh (main thread tu dispatch)
 #ifdef __cplusplus
 }
 #endif

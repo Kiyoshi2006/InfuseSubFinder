@@ -47,7 +47,8 @@ static BOOL sf_install_hooks(void) {
 }
 
 static void sf_app_ready(void) {
-    sf_install_hooks();
+    BOOL hooked = sf_install_hooks();
+    SFToast(hooked ? @"ISF v0.2: đã nạp, hook OK — đang quét sub..." : @"ISF v0.2: đã nạp nhưng HOOK LỖI (xem log)");
     [[SFEngine shared] startIndexingIfNeeded];
 }
 

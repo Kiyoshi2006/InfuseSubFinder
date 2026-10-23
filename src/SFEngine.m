@@ -84,6 +84,43 @@ void SFLog(NSString *format, ...) {
     });
 }
 
+// ------------------------------------------------------------------ thong bao tren man hinh
+
+void SFToast(NSString *text) {
+    if (!text.length) return;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        UIWindow *win = nil;
+        for (UIScene *sc in [UIApplication sharedApplication].connectedScenes) {
+            if (![sc isKindOfClass:[UIWindowScene class]]) continue;
+            for (UIWindow *w in ((UIWindowScene *)sc).windows) {
+                if (w.isKeyWindow) { win = w; break; }
+            }
+            if (win) break;
+        }
+        if (!win) return;
+        UILabel *l = [[UILabel alloc] init];
+        l.numberOfLines = 0;
+        l.font = [UIFont systemFontOfSize:13 weight:UIFontWeightMedium];
+        l.textColor = [UIColor whiteColor];
+        l.backgroundColor = [UIColor colorWithWhite:0 alpha:0.78];
+        l.layer.cornerRadius = 10;
+        l.layer.masksToBounds = YES;
+        l.textAlignment = NSTextAlignmentCenter;
+        l.text = [NSString stringWithFormat:@"  %@  ", text];
+        l.userInteractionEnabled = NO;
+        CGFloat w = MIN(win.bounds.size.width - 32, 520);
+        CGSize sz = [l sizeThatFits:CGSizeMake(w, CGFLOAT_MAX)];
+        CGFloat h = sz.height + 12;
+        l.frame = CGRectMake((win.bounds.size.width - w) / 2, win.safeAreaInsets.top + 8, w, h);
+        l.alpha = 0;
+        [win addSubview:l];
+        [UIView animateWithDuration:0.2 animations:^{ l.alpha = 1; }];
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(6 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            [UIView animateWithDuration:0.4 animations:^{ l.alpha = 0; } completion:^(BOOL f) { [l removeFromSuperview]; }];
+        });
+    });
+}
+
 // ------------------------------------------------------------------ du lieu
 
 @interface SFSubEntry : NSObject
@@ -118,6 +155,8 @@ void SFLog(NSString *format, ...) {
 @property (nonatomic, strong) dispatch_group_t crawlGroup;
 @property (nonatomic, strong) NSMutableDictionary<NSString *, NSDate *> *lastPrepared;
 @property (nonatomic, strong) NSMutableSet<NSString *> *inFlight;
+@property (nonatomic, assign) NSInteger sourcesCrawled;
+@property (nonatomic, assign) BOOL toastedIndex;
 @end
 
 @implementation SFEngine
@@ -147,6 +186,7 @@ void SFLog(NSString *format, ...) {
 - (NSDictionary *)defaultConfig {
     return @{
         @"enabled": @YES,
+        @"showToast": @YES,               // hien thong bao trang thai tren man hinh
         @"minScore": @60,
         @"maxPerVideo": @4,
         @"languages": @[],                // vd ["Vietnamese","English"]; rong = tat ca
@@ -250,6 +290,7 @@ void SFLog(NSString *format, ...) {
     NSArray *all = SFArr0(mgr, @"allVFSs");
     if (!mgr || !all) {
         SFLog(@"[index] khong lay duoc VFSManager/allVFSs (Infuse doi API?)");
+        SFToast(@"ISF: không lấy được danh sách nguồn của Infuse (VFSManager)");
         return;
     }
     [self loadConfig];
@@ -261,8 +302,10 @@ void SFLog(NSString *format, ...) {
     NSInteger maxFolders = [self intCfg:@"maxFoldersPerSource"];
     NSTimeInterval budget = [self intCfg:@"sourceBudgetSeconds"];
 
+    NSInteger sourcesDone = 0;
     for (id vfs in all) {
         if (![self shouldCrawlVFS:vfs manager:mgr]) continue;
+        sourcesDone++;
         NSString *srcName = SFStr0(vfs, @"name") ?: NSStringFromClass([vfs class]);
         NSString *srcId = SFStr0(vfs, @"identifier") ?: srcName;
         id root = SFObj0(vfs, @"makeRootItem");
@@ -331,8 +374,13 @@ void SFLog(NSString *format, ...) {
               (long)folders, (long)files, (long)subs, (long)failed, -[srcStart timeIntervalSinceNow]);
     }
 
-    @synchronized(self) { self.index = result; }
-    SFLog(@"[index] xong: %lu sub, %.1fs", (unsigned long)result.count, -[t0 timeIntervalSinceNow]);
+    @synchronized(self) { self.index = result; self.sourcesCrawled = sourcesDone; }
+    SFLog(@"[index] xong: %lu sub, %ld nguon, %.1fs", (unsigned long)result.count, (long)sourcesDone, -[t0 timeIntervalSinceNow]);
+    if (!self.toastedIndex && [self boolCfg:@"showToast"]) {
+        self.toastedIndex = YES;
+        SFToast([NSString stringWithFormat:@"ISF: quét xong %lu sub từ %ld nguồn (tổng %lu VFS)", (unsigned long)result.count,
+                 (long)sourcesDone, (unsigned long)all.count]);
+    }
     if (result.count == 0) {
         SFLog(@"[index] khong thay sub nao. Neu m chac chan co sub trong nguon da them thi gui log nay cho tao.");
     }
@@ -341,19 +389,30 @@ void SFLog(NSString *format, ...) {
 // ---------------------------------------------------------------- khop + nhap
 
 - (void)prepareSubtitlesForMediaFile:(id)mf {
-    if (![self boolCfg:@"enabled"]) return;
-    if (!mf || !SFBool0(mf, @"canHaveExternalSubtitles")) return;
+    NSString *status = [self prepareInternal:mf];
+    if (status.length) {
+        SFLog(@"[status] %@", status);
+        if ([self boolCfg:@"showToast"]) SFToast(status);
+    }
+}
+
+// Tra ve dong trang thai de hien cho nguoi dung (nil = im lang).
+- (NSString *)prepareInternal:(id)mf {
+    if (![self boolCfg:@"enabled"]) return nil;
+    if (!mf) return @"ISF: hook chạy nhưng không có FCMediaFile";
+    if (!SFBool0(mf, @"canHaveExternalSubtitles")) return @"ISF: video này không nhận sub ngoài (canHaveExternalSubtitles = NO)";
 
     id movie = SFObj0(mf, @"movieItem");
     id itemID = SFObj0(movie, @"itemIDObj");
     NSString *vName = SFStr0(movie, @"fileName");
-    if (!movie || !itemID || !vName.length) return;
+    if (!movie || !itemID || !vName.length)
+        return [NSString stringWithFormat:@"ISF: thiếu thông tin video (movieItem=%d itemID=%d tên=%d)", movie != nil, itemID != nil, vName.length > 0];
     NSString *key = SFStr0(itemID, @"hashString") ?: [itemID description];
 
     // Infuse goi ham nay nhieu lan khi mo mot video: chi lam 1 lan / 20 giay.
     @synchronized(self) {
         NSDate *last = self.lastPrepared[key];
-        if (last && -[last timeIntervalSinceNow] < 20) return;
+        if (last && -[last timeIntervalSinceNow] < 20) return nil;
         self.lastPrepared[key] = [NSDate date];
         if (self.lastPrepared.count > 200) [self.lastPrepared removeAllObjects];
     }
@@ -368,8 +427,7 @@ void SFLog(NSString *format, ...) {
         @synchronized(self) { index = self.index; }
     }
     if (index.count == 0) {
-        SFLog(@"[match] '%@': chua co index sub", vName);
-        return;
+        return [NSString stringWithFormat:@"ISF: '%@' — chưa có index sub (đang quét hoặc quét lỗi), xem log", vName];
     }
 
     id movieParent = SFObj0(movie, @"parent");
@@ -401,7 +459,8 @@ void SFLog(NSString *format, ...) {
     }
     SFLog(@"[match] '%@' (thu muc '%@'): %lu ung vien / %lu sub, %.0fms", vName, vFolder, (unsigned long)cands.count,
           (unsigned long)index.count, -[t0 timeIntervalSinceNow] * 1000);
-    if (cands.count == 0) return;
+    if (cands.count == 0)
+        return [NSString stringWithFormat:@"ISF: '%@' — index %lu sub, không sub nào khớp tên", vName, (unsigned long)index.count];
 
     [cands sortUsingComparator:^NSComparisonResult(SFCandidate *a, SFCandidate *b) {
         if (a.score != b.score) return a.score > b.score ? NSOrderedAscending : NSOrderedDescending;
@@ -417,8 +476,7 @@ void SFLog(NSString *format, ...) {
 
     id cache = SFObj0(NSClassFromString(@"FCSubtitlesCache"), @"shared");
     if (!cache) {
-        SFLog(@"[import] khong tim thay FCSubtitlesCache");
-        return;
+        return @"ISF: không tìm thấy FCSubtitlesCache (Infuse đổi API?)";
     }
 
     // Sub da co san trong cache cua video nay (theo ten hien thi) thi bo qua.
@@ -471,7 +529,9 @@ void SFLog(NSString *format, ...) {
         SEL inv = NSSelectorFromString(@"invalidateExternalSubtitlesCache");
         if ([mf respondsToSelector:inv]) ((void (*)(id, SEL))objc_msgSend)(mf, inv);
         SFLog(@"[import] da nap %ld sub cho '%@'", (long)n, vName);
+        return [NSString stringWithFormat:@"ISF: đã nạp %ld sub cho '%@' (khớp %lu)", (long)n, vName, (unsigned long)cands.count];
     }
+    return [NSString stringWithFormat:@"ISF: '%@' khớp %lu sub nhưng nạp 0 (đã có sẵn hoặc tải lỗi), xem log", vName, (unsigned long)cands.count];
 }
 
 - (BOOL)importCandidate:(SFCandidate *)c itemID:(id)itemID cache:(id)cache {
