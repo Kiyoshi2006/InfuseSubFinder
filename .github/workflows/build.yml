@@ -1,0 +1,43 @@
+name: Build InfuseSubFinder
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ["src/**", "tests/**", ".github/workflows/build.yml"]
+
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Test bo khop ten
+        run: |
+          clang -Wall -Wextra -Isrc src/SFMatch.c tests/test_match.c -o /tmp/test_match
+          /tmp/test_match
+
+      - name: Build dylib (iOS arm64)
+        run: |
+          mkdir -p out
+          xcrun --sdk iphoneos clang \
+            -arch arm64 -miphoneos-version-min=14.0 \
+            -dynamiclib -fobjc-arc -fblocks -O2 -fvisibility=hidden \
+            -Wall -Wno-unused-parameter -Wno-deprecated-declarations \
+            -framework Foundation -framework UIKit \
+            -install_name @rpath/InfuseSubFinder.dylib \
+            -Isrc src/Tweak.m src/SFEngine.m src/SFMatch.c \
+            -o out/InfuseSubFinder.dylib
+          xcrun strip -x out/InfuseSubFinder.dylib || true
+
+      - name: Ky gia (ldid)
+        run: |
+          brew install ldid
+          ldid -S out/InfuseSubFinder.dylib
+          file out/InfuseSubFinder.dylib
+          otool -L out/InfuseSubFinder.dylib
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: InfuseSubFinder
+          path: out/InfuseSubFinder.dylib
