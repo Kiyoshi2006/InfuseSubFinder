@@ -22,6 +22,12 @@ const char *sf_language_from_name(const char *subName);
 // 1 neu `ext` (khong co dau cham, khong phan biet hoa thuong) la duoi file sub ho tro.
 int sf_is_subtitle_ext(const char *ext);
 
+// Phan tich ten: lay mua/tap (-1 neu khong co). Tra ve 1 neu co tap.
+int sf_parse_se(const char *name, int *season, int *episode);
+
+// Mo ta cach phan tich ten (de chan doan), vd "S2 E1 Y0 [dungeon deai motomeru ...]".
+void sf_describe(const char *name, char *out, unsigned long cap);
+
 #ifdef __cplusplus
 }
 #endif

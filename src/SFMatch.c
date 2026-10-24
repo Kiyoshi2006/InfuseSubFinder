@@ -441,6 +441,22 @@ int sf_score(const char *videoName, const char *videoFolder, const char *subName
     return sc > 99.0 ? 99 : (int)sc;
 }
 
+int sf_parse_se(const char *name, int *season, int *episode) {
+    SFInfo i;
+    parse_info(name, &i);
+    if (season) *season = i.season;
+    if (episode) *episode = i.episode;
+    return i.episode >= 0;
+}
+
+void sf_describe(const char *name, char *out, unsigned long cap) {
+    SFInfo i;
+    parse_info(name, &i);
+    int n = snprintf(out, cap, "S%d E%d Y%d [", i.season, i.episode, i.year);
+    for (int k = 0; k < i.ntitle && n > 0 && (unsigned long)n + 40 < cap; k++) n += snprintf(out + n, cap - (unsigned long)n, "%s%s", k ? " " : "", i.title[k]);
+    if (n > 0 && (unsigned long)n + 2 < cap) snprintf(out + n, cap - (unsigned long)n, "]");
+}
+
 const char *sf_language_from_name(const char *subName) {
     if (!subName) return NULL;
     char a[512], b[512], c[1024];

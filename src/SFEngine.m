@@ -390,6 +390,19 @@ void SFShowText(NSString *title, NSString *text) {
         }
 
         NSDate *srcStart = [NSDate date];
+        {   // nguon chi dinh thang mot file sub: root chinh la file do
+            NSString *rn = SFStr0(root, @"fileName");
+            NSString *re = [(SFStr0(root, @"fileExtension") ?: rn.pathExtension) lowercaseString];
+            if (rn.length && [exts containsObject:re] && sf_is_subtitle_ext(re.UTF8String)) {
+                SFSubEntry *e = [[SFSubEntry alloc] init];
+                e.item = root; e.name = rn; e.ext = re;
+                e.folderName = SFTrimSlash(SFStr0(SFObj0(root, @"parent"), @"fileName") ?: srcName);
+                e.folderPath = SFStr0(SFObj0(root, @"parent"), @"path") ?: @"";
+                e.sourceId = srcId; e.sourceName = srcName;
+                [result addObject:e];
+                [diag appendFormat:@"  (root la file sub: %@)\n", rn];
+            }
+        }
         NSMutableArray *queue = [NSMutableArray arrayWithObject:@[ root, @0 ]];
         NSUInteger head = 0;
         NSInteger folders = 0, files = 0, subs = 0, failed = 0;
@@ -546,13 +559,15 @@ void SFShowText(NSString *title, NSString *text) {
 
     NSMutableArray<SFCandidate *> *cands = [NSMutableArray array];
     NSDate *t0 = [NSDate date];
+    NSInteger nSkipSame = 0, nLow = 0;
     for (SFSubEntry *e in index) {
         if (skipSame && vParentPath && movieSource && [e.sourceId isEqualToString:movieSource] &&
             [e.folderPath isEqualToString:vParentPath]) {
+            nSkipSame++;
             continue;
         }
         int sc = sf_score(vName.UTF8String, vFolder.UTF8String, e.name.UTF8String, e.folderName.UTF8String);
-        if (sc < minScore) continue;
+        if (sc < minScore) { nLow++; continue; }
         const char *lang = sf_language_from_name(e.name.UTF8String);
         NSString *language = lang ? [NSString stringWithUTF8String:lang] : nil;
         if (langFilter.count > 0 && language && ![langFilter containsObject:language]) continue;
@@ -564,8 +579,11 @@ void SFShowText(NSString *title, NSString *text) {
     }
     SFLog(@"[match] '%@' (thu muc '%@'): %lu ung vien / %lu sub, %.0fms", vName, vFolder, (unsigned long)cands.count,
           (unsigned long)index.count, -[t0 timeIntervalSinceNow] * 1000);
-    if (cands.count == 0)
-        return [NSString stringWithFormat:@"ISF: '%@' — index %lu sub, không sub nào khớp tên", vName, (unsigned long)index.count];
+    if (cands.count == 0) {
+        [self showNoMatchDiagForVideo:vName folder:vFolder parentPath:vParentPath source:movieSource index:index skipSame:nSkipSame low:nLow];
+        return [NSString stringWithFormat:@"ISF: '%@' — index %lu sub, không sub nào khớp (cùng thư mục: %ld, điểm thấp: %ld)", vName,
+                (unsigned long)index.count, (long)nSkipSame, (long)nLow];
+    }
 
     [cands sortUsingComparator:^NSComparisonResult(SFCandidate *a, SFCandidate *b) {
         if (a.score != b.score) return a.score > b.score ? NSOrderedAscending : NSOrderedDescending;
@@ -637,6 +655,38 @@ void SFShowText(NSString *title, NSString *text) {
         return [NSString stringWithFormat:@"ISF: đã nạp %ld sub cho '%@' (khớp %lu)", (long)n, vName, (unsigned long)cands.count];
     }
     return [NSString stringWithFormat:@"ISF: '%@' khớp %lu sub nhưng nạp 0 (đã có sẵn hoặc tải lỗi), xem log", vName, (unsigned long)cands.count];
+}
+
+- (void)showNoMatchDiagForVideo:(NSString *)vName folder:(NSString *)vFolder parentPath:(NSString *)vParentPath
+                        source:(NSString *)movieSource index:(NSArray<SFSubEntry *> *)index skipSame:(NSInteger)nSkip low:(NSInteger)nLow {
+    static NSInteger shownCount = 0;
+    if (shownCount >= 3 && ![self boolCfg:@"diagnostic"]) return;
+    shownCount++;
+    char buf[320];
+    int vs = -1, ve = -1;
+    sf_describe(vName.UTF8String, buf, sizeof buf);
+    sf_parse_se(vName.UTF8String, &vs, &ve);
+    NSMutableString *d = [NSMutableString string];
+    [d appendFormat:@"VIDEO: %@\n  thu muc: %@\n  duong dan thu muc: %@\n  nguon: %@\n  phan tich: %s\n\n", vName, vFolder, vParentPath, movieSource, buf];
+    [d appendFormat:@"INDEX %lu sub | bo qua vi cung thu muc: %ld | diem < %ld: %ld\n\n", (unsigned long)index.count, (long)nSkip,
+     (long)[self intCfg:@"minScore"], (long)nLow];
+    // uu tien liet ke sub cung tap voi video, roi toi cac sub dau tien
+    NSMutableArray *ordered = [NSMutableArray array], *rest = [NSMutableArray array];
+    for (SFSubEntry *e in index) {
+        int s = -1, ep = -1;
+        sf_parse_se(e.name.UTF8String, &s, &ep);
+        if (ep >= 0 && ep == ve) [ordered addObject:e]; else [rest addObject:e];
+    }
+    [ordered addObjectsFromArray:rest];
+    NSUInteger shown = 0;
+    for (SFSubEntry *e in ordered) {
+        if (shown++ >= 10) break;
+        sf_describe(e.name.UTF8String, buf, sizeof buf);
+        [d appendFormat:@"- %@\n    thu muc: %@ | nguon: %@ (id %@)\n    duong dan thu muc: %@\n    phan tich: %s | diem: %d\n", e.name, e.folderName,
+         e.sourceName, e.sourceId, e.folderPath, buf, sf_score(vName.UTF8String, vFolder.UTF8String, e.name.UTF8String, e.folderName.UTF8String)];
+    }
+    SFLog(@"[diag] khong khop:\n%@", d);
+    if ([self boolCfg:@"showToast"]) SFShowText(@"ISF chẩn đoán: không sub nào khớp (chụp màn hình gửi tao)", d);
 }
 
 - (BOOL)importCandidate:(SFCandidate *)c itemID:(id)itemID cache:(id)cache {
