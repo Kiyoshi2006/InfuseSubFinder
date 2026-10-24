@@ -86,7 +86,7 @@ void SFLog(NSString *format, ...) {
 
 // ------------------------------------------------------------------ thong bao tren man hinh
 
-static UIWindow *SFKeyWindow(void) {
+UIWindow *SFKeyWindow(void) {
     for (UIScene *sc in [UIApplication sharedApplication].connectedScenes) {
         if (![sc isKindOfClass:[UIWindowScene class]]) continue;
         for (UIWindow *w in ((UIWindowScene *)sc).windows) {
@@ -208,6 +208,11 @@ void SFShowText(NSString *title, NSString *text) {
 @property (nonatomic, copy) NSString *diagText;
 @property (nonatomic, assign) BOOL diagShown;
 @property (nonatomic, assign) NSInteger crawlRetries;
+@property (nonatomic, strong) NSMutableDictionary *settings;
+@property (nonatomic, copy) NSString *progSource;
+@property (nonatomic, assign) double progFraction;
+@property (nonatomic, assign) NSInteger progFolders, progSubs;
+@property (nonatomic, assign) BOOL launchCrawlDone;
 @end
 
 @implementation SFEngine
@@ -229,6 +234,7 @@ void SFShowText(NSString *title, NSString *text) {
         _inFlight = [NSMutableSet set];
         _index = @[];
         [self loadConfig];
+        [self loadSettings];
         [self loadIndexFromDisk];
     }
     return self;
@@ -239,6 +245,7 @@ void SFShowText(NSString *title, NSString *text) {
 - (NSDictionary *)defaultConfig {
     return @{
         @"enabled": @YES,
+        @"floatingButton": @NO,           // true = nut ISF noi tren man hinh (mac dinh dung dong trong Cai dat)
         @"showToast": @YES,               // hien thong bao trang thai tren man hinh
         @"diagnostic": @NO,               // true = luon hien bang chan doan sau moi lan quet
         @"minScore": @60,
@@ -318,19 +325,40 @@ void SFShowText(NSString *title, NSString *text) {
     return YES;
 }
 
+- (NSString *)autoMode { return self.settings[@"auto"] ?: @"12h"; }
+
 - (void)startIndexingIfNeeded {
+    NSString *mode = [self autoMode];
+    BOOL force = NO;
+    NSTimeInterval maxAge = 12 * 3600.0;
+    @synchronized(self) {
+        if (!self.lastCrawl) force = YES;                              // chua tung quet
+        else if ([mode isEqualToString:@"launch"]) { if (!self.launchCrawlDone) force = YES; }
+        else if ([mode isEqualToString:@"hourly"]) maxAge = 3600.0;
+        else if ([mode isEqualToString:@"manual"]) maxAge = 1e12;
+        if (!force && self.lastCrawl && -[self.lastCrawl timeIntervalSinceNow] < maxAge) return;
+        self.launchCrawlDone = YES;
+    }
+    [self startCrawlOnly:nil];
+}
+
+- (BOOL)floatingButton { return [self.config[@"floatingButton"] boolValue]; }
+
+- (BOOL)isCrawling { @synchronized(self) { return self.crawling; } }
+
+// Quet mot so nguon (only = nil: tat ca nguon dang bat). Chay nen.
+- (void)startCrawlOnly:(NSSet *)only {
     if (![self boolCfg:@"enabled"]) return;
-    NSTimeInterval maxAge = MAX(1, [self intCfg:@"rescanHours"]) * 3600.0;
     @synchronized(self) {
         if (self.crawling) return;
-        if (self.lastCrawl && -[self.lastCrawl timeIntervalSinceNow] < maxAge) return;
         self.crawling = YES;
     }
+    self.progFraction = 0; self.progSource = nil;
     dispatch_group_enter(self.crawlGroup);
     dispatch_async(self.crawlQueue, ^{
         BOOL ok = NO;
         @try {
-            @autoreleasepool { ok = [self crawlAll]; }
+            @autoreleasepool { ok = [self crawlOnly:only]; }
         } @catch (NSException *e) {
             SFLog(@"[index] loi: %@", e);
             self.diagText = [NSString stringWithFormat:@"Ngoai le khi quet: %@", e];
@@ -344,14 +372,84 @@ void SFShowText(NSString *title, NSString *text) {
         }
         dispatch_group_leave(self.crawlGroup);
         if (retry) {
-            SFLog(@"[index] VFS chua san sang, thu lai sau 4s (lan %ld)", (long)self.crawlRetries);
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(4 * NSEC_PER_SEC)), self.crawlQueue, ^{ [self startIndexingIfNeeded]; });
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(4 * NSEC_PER_SEC)), self.crawlQueue, ^{ [self startCrawlOnly:only]; });
         }
     });
 }
 
+- (void)refreshAll { [self startCrawlOnly:nil]; }
+- (void)refreshSource:(NSString *)sid { if (sid.length) [self startCrawlOnly:[NSSet setWithObject:sid]]; }
+
+// ---- cai dat nguoi dung (settings.json)
+
+- (NSString *)settingsPath { return [SFSupportDir() stringByAppendingPathComponent:@"settings.json"]; }
+- (void)loadSettings {
+    NSData *d = [NSData dataWithContentsOfFile:[self settingsPath]];
+    id o = d ? [NSJSONSerialization JSONObjectWithData:d options:NSJSONReadingMutableContainers error:nil] : nil;
+    self.settings = [o isKindOfClass:[NSMutableDictionary class]] ? o : [NSMutableDictionary dictionary];
+}
+- (void)saveSettings {
+    NSData *d;
+    @synchronized(self) { d = [NSJSONSerialization dataWithJSONObject:self.settings options:0 error:nil]; }
+    if (d) [d writeToFile:[self settingsPath] atomically:YES];
+}
+- (BOOL)isSourceDisabled:(NSString *)sid {
+    @synchronized(self) { return [(NSArray *)self.settings[@"disabled"] containsObject:sid]; }
+}
+- (void)setSource:(NSString *)sid enabled:(BOOL)on {
+    @synchronized(self) {
+        NSMutableArray *a = [(NSArray *)self.settings[@"disabled"] mutableCopy] ?: [NSMutableArray array];
+        [a removeObject:sid];
+        if (!on) [a addObject:sid];
+        self.settings[@"disabled"] = a;
+    }
+    [self saveSettings];
+}
+- (void)setAutoMode:(NSString *)mode {
+    @synchronized(self) { self.settings[@"auto"] = mode; }
+    [self saveSettings];
+}
+
+// Danh sach nguon cho giao dien: id, name, subs, enabled, last (giay).
+- (NSArray<NSDictionary *> *)sourceList {
+    id mgr = SFObj0(NSClassFromString(@"VFSManager"), @"sharedManager");
+    NSMutableArray *out = [NSMutableArray array];
+    NSArray<SFSubEntry *> *idx;
+    @synchronized(self) { idx = self.index; }
+    for (id v in SFArr0(mgr, @"allVFSs")) {
+        NSString *name = SFStr0(v, @"name") ?: @"?";
+        if ([name isEqualToString:@"vfLocalFiles"] || ![self shouldCrawlVFS:v manager:mgr]) continue;
+        NSString *sid = SFStr0(v, @"identifier") ?: name;
+        NSInteger n = 0;
+        for (SFSubEntry *e in idx) if ([e.sourceId isEqualToString:sid]) n++;
+        NSNumber *last = ((NSDictionary *)self.settings[@"last"])[sid];
+        [out addObject:@{ @"id": sid, @"name": name, @"subs": @(n), @"enabled": @(![self isSourceDisabled:sid]), @"last": last ?: @0 }];
+    }
+    return out;
+}
+
+- (NSInteger)totalSubs { @synchronized(self) { return (NSInteger)self.index.count; } }
+- (NSString *)progressSource { return self.progSource; }
+- (double)progress { return self.progFraction; }
+- (NSInteger)progressFolders { return self.progFolders; }
+
+// Cong bo ket qua tam: ket qua moi + muc cu cua nguon chua quet (va con ton tai).
+- (void)publishResult:(NSArray *)result crawled:(NSSet *)crawled including:(NSString *)cur allIds:(NSSet *)allIds {
+    @synchronized(self) {
+        NSMutableArray *merged = [result mutableCopy];
+        for (SFSubEntry *old in self.index) {
+            if ([crawled containsObject:old.sourceId] || [cur isEqualToString:old.sourceId]) continue;
+            if (![allIds containsObject:old.sourceId]) continue;
+            [merged addObject:old];
+        }
+        self.index = merged;
+    }
+}
+
 // Tra ve NO neu VFS chua san sang (se thu lai).
-- (BOOL)crawlAll {
+- (BOOL)crawlAll { return [self crawlOnly:nil]; }
+
+- (BOOL)crawlOnly:(NSSet *)only {
     Class mgrCls = NSClassFromString(@"VFSManager");
     id mgr = SFObj0(mgrCls, @"sharedManager");
     NSArray *all = SFArr0(mgr, @"allVFSs");
@@ -382,6 +480,16 @@ void SFShowText(NSString *title, NSString *text) {
         return NSOrderedSame;
     }];
     NSMutableSet *crawledIds = [NSMutableSet set];
+    NSMutableSet *allIds = [NSMutableSet set];
+    NSInteger totalSources = 0;
+    for (id v in all) {
+        NSString *i0 = SFStr0(v, @"identifier") ?: (SFStr0(v, @"name") ?: @"?");
+        [allIds addObject:i0];
+        if ([[SFStr0(v, @"name") ?: @"" description] isEqualToString:@"vfLocalFiles"]) continue;
+        if ([self shouldCrawlVFS:v manager:mgr] && (only ? [only containsObject:i0] : ![self isSourceDisabled:i0])) totalSources++;
+    }
+    totalSources = MAX(1, totalSources);
+    self.progFraction = 0;
     NSInteger sourcesDone = 0;
     for (id vfs in all) {
         if ([(SFStr0(vfs, @"name") ?: @"") isEqualToString:@"vfLocalFiles"]) continue;  // thu muc noi bo cua app, 16000 file khong co sub
@@ -393,8 +501,11 @@ void SFShowText(NSString *title, NSString *text) {
             [diag appendFormat:@"- %@ [%@ p%ld]: BO QUA\n", srcName, cls, proto];
             continue;
         }
-        sourcesDone++;
         NSString *srcId = SFStr0(vfs, @"identifier") ?: srcName;
+        if (only ? ![only containsObject:srcId] : [self isSourceDisabled:srcId]) continue;
+        sourcesDone++;
+        self.progSource = srcName;
+        self.progFolders = 0;
         id root = SFObj0(vfs, @"makeRootItem");
         id browser = SFObj0(vfs, @"browser");
         if (!root || !browser || ![browser respondsToSelector:fetchSel]) {
@@ -434,6 +545,10 @@ void SFShowText(NSString *title, NSString *text) {
             id folder = entry[0];
             NSInteger depth = [entry[1] integerValue];
             folders++;
+            self.progFolders = folders;
+            self.progSubs = (NSInteger)result.count;
+            self.progFraction = ((double)sourcesDone - 1 + (double)folders / (double)(folders + (NSInteger)(queue.count - head))) / (double)totalSources;
+            if (folders % 25 == 0) [self publishResult:result crawled:crawledIds including:srcId allIds:allIds];
 
             NSError *__autoreleasing err = nil;
             BOOL ok = NO;
@@ -495,14 +610,14 @@ void SFShowText(NSString *title, NSString *text) {
          [extParts componentsJoinedByString:@" "], [sampleNames componentsJoinedByString:@" | "]];
         if (firstErr) [diag appendFormat:@"    loi dau tien: %@\n", firstErr];
         [crawledIds addObject:srcId];
-        @synchronized(self) {   // dung duoc ngay; giu muc cu cua nguon chua quet toi
-            NSMutableArray *merged = [result mutableCopy];
-            for (SFSubEntry *old in self.index) if (![crawledIds containsObject:old.sourceId]) [merged addObject:old];
-            self.index = merged;
-        }
+        [self publishResult:result crawled:crawledIds including:nil allIds:allIds];
+        @synchronized(self) { self.settings[@"last"] = [self.settings[@"last"] mutableCopy] ?: [NSMutableDictionary dictionary]; ((NSMutableDictionary *)self.settings[@"last"])[srcId] = @([[NSDate date] timeIntervalSince1970]); }
+        [self saveSettings];
     }
 
-    @synchronized(self) { self.index = [result copy]; self.sourcesCrawled = sourcesDone; }
+    [self publishResult:result crawled:crawledIds including:nil allIds:allIds];
+    self.sourcesCrawled = sourcesDone;
+    self.progFraction = 1;
     [self saveIndex];
     [diag appendFormat:@"=> %lu sub, %ld nguon duoc quet, %.1fs\n", (unsigned long)result.count, (long)sourcesDone, -[t0 timeIntervalSinceNow]];
     for (NSUInteger i = 0; i < MIN((NSUInteger)5, result.count); i++) [diag appendFormat:@"   vd: %@ (thu muc: %@)\n", result[i].name, result[i].folderName];
@@ -605,6 +720,7 @@ static const void *kSFAttachedKey = &kSFAttachedKey;
 
     NSMutableArray<SFCandidate *> *cands = [NSMutableArray array];
     for (SFSubEntry *e in index) {
+        if ([self isSourceDisabled:e.sourceId]) continue;
         if (skipSame && vParentPath && movieSource && [e.sourceId isEqualToString:movieSource] && [e.folderPath isEqualToString:vParentPath]) continue;
         int sc = sf_score(vName.UTF8String, vFolder.UTF8String, e.name.UTF8String, e.folderName.UTF8String);
         if (sc < minScore) continue;

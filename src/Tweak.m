@@ -37,9 +37,17 @@ static BOOL sf_install_hooks(void) {
 }
 
 static void sf_app_ready(void) {
+    static BOOL done = NO;
+    @synchronized([SFEngine class]) { if (done) return; done = YES; }   // chi lam mot lan moi lan mo app
     BOOL hooked = sf_install_hooks();
-    SFToast(hooked ? @"ISF v0.8: đã nạp, hook OK" : @"ISF v0.8: đã nạp nhưng HOOK LỖI (xem log)");
+    if (!hooked) SFToast(@"ISF: HOOK LỖI (xem log)");
+    SFInstallSettingsHook();
+    SFInstallUI();
     [[SFEngine shared] startIndexingIfNeeded];
+    // che do "moi gio": kiem tra dinh ky
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [NSTimer scheduledTimerWithTimeInterval:600 repeats:YES block:^(NSTimer *tm) { [[SFEngine shared] startIndexingIfNeeded]; }];
+    });
 }
 
 __attribute__((constructor)) static void sf_init(void) {
