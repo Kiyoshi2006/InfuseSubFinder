@@ -198,6 +198,7 @@ void SFShowText(NSString *title, NSString *text) {
 @property (nonatomic, strong) dispatch_queue_t crawlQueue;
 @property (nonatomic, strong) dispatch_queue_t importQueue;
 @property (nonatomic, strong) dispatch_group_t crawlGroup;
+@property (nonatomic, strong) NSMutableSet *pendingRetry;
 @property (nonatomic, strong) NSMutableDictionary<NSString *, NSDate *> *lastPrepared;
 @property (nonatomic, strong) NSMutableSet<NSString *> *inFlight;
 @property (nonatomic, assign) NSInteger sourcesCrawled;
@@ -221,6 +222,7 @@ void SFShowText(NSString *title, NSString *text) {
         _crawlQueue = dispatch_queue_create("isf.crawl", DISPATCH_QUEUE_SERIAL);
         _importQueue = dispatch_queue_create("isf.import", DISPATCH_QUEUE_SERIAL);
         _crawlGroup = dispatch_group_create();
+        _pendingRetry = [NSMutableSet set];
         _lastPrepared = [NSMutableDictionary dictionary];
         _inFlight = [NSMutableSet set];
         _index = @[];
@@ -544,6 +546,17 @@ void SFShowText(NSString *title, NSString *text) {
             self.diagShown = YES;
             SFShowText(@"ISF chẩn đoán: index sub trống (chụp màn hình gửi tao)", self.diagText);
         }
+        if (stillCrawling) {
+            // quet xong thi tu chay lai cho video nay (khong can mo lai video)
+            BOOL first;
+            @synchronized(self) { first = ![self.pendingRetry containsObject:key]; if (first) [self.pendingRetry addObject:key]; }
+            if (first) {
+                dispatch_group_notify(self.crawlGroup, dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+                    @synchronized(self) { [self.pendingRetry removeObject:key]; [self.lastPrepared removeObjectForKey:key]; }
+                    [self prepareSubtitlesForMediaFile:mf];
+                });
+            }
+        }
         return [NSString stringWithFormat:@"ISF: '%@' — index sub trống (%@)", vName, stillCrawling ? @"đang quét, thử lại sau ít giây" : @"quét xong nhưng không thấy sub"];
     }
     }
@@ -640,7 +653,19 @@ void SFShowText(NSString *title, NSString *text) {
         });
     }
 
-    // Tren main thread thi khong cho (tranh treo UI); sub se co o lan mo sau.
+    // Tren main thread thi khong cho (tranh treo UI); xong viec nen thi nap lai danh sach sub.
+    if (onMain) {
+        dispatch_group_notify(done, dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+            NSInteger k;
+            @synchronized(self) { k = imported; }
+            if (k <= 0) return;
+            dispatch_async(dispatch_get_main_queue(), ^{
+                SEL inv2 = NSSelectorFromString(@"invalidateExternalSubtitlesCache");
+                if ([mf respondsToSelector:inv2]) ((void (*)(id, SEL))objc_msgSend)(mf, inv2);
+            });
+            SFToast([NSString stringWithFormat:@"ISF: đã nạp %ld sub cho '%@' — mở menu sub để chọn", (long)k, vName]);
+        });
+    }
     if (!onMain) {
         NSTimeInterval to = [self intCfg:@"downloadTimeoutSeconds"];
         long r = dispatch_group_wait(done, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(to * NSEC_PER_SEC)));
