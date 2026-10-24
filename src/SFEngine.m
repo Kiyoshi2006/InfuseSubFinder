@@ -213,6 +213,9 @@ void SFShowText(NSString *title, NSString *text) {
 @property (nonatomic, assign) double progFraction;
 @property (nonatomic, assign) NSInteger progFolders, progSubs;
 @property (nonatomic, assign) BOOL launchCrawlDone;
+@property (nonatomic, assign) BOOL cancelRequested;
+@property (nonatomic, copy) NSString *activeKey;   // nil = tat ca, "sid" = nguon, "sid|path" = thu muc
+@property (nonatomic, copy) NSString *subSid, *subPath;
 @end
 
 @implementation SFEngine
@@ -317,7 +320,6 @@ void SFShowText(NSString *title, NSString *text) {
     if (![vfs respondsToSelector:NSSelectorFromString(@"makeRootItem")]) return NO;
     if ([SFArr0(mgr, @"mediaServerVFSs") containsObject:vfs]) return NO;   // Plex / Emby / Jellyfin co sub rieng
     if ([SFArr0(mgr, @"embyJellyfinVFSs") containsObject:vfs]) return NO;
-    if (![self boolCfg:@"includeCloudSources"] && [SFArr0(mgr, @"cloudVFSs") containsObject:vfs]) return NO;
     NSString *name = [SFStr0(vfs, @"name") lowercaseString] ?: @"";
     for (id ex in (NSArray *)self.config[@"excludeSources"]) {
         if ([ex isKindOfClass:[NSString class]] && [name containsString:[ex lowercaseString]]) return NO;
@@ -347,18 +349,24 @@ void SFShowText(NSString *title, NSString *text) {
 - (BOOL)isCrawling { @synchronized(self) { return self.crawling; } }
 
 // Quet mot so nguon (only = nil: tat ca nguon dang bat). Chay nen.
-- (void)startCrawlOnly:(NSSet *)only {
+- (void)startCrawlOnly:(NSSet *)only { [self startCrawlOnly:only startItem:nil key:nil]; }
+
+- (void)startCrawlOnly:(NSSet *)only startItem:(id)startItem key:(NSString *)key {
     if (![self boolCfg:@"enabled"]) return;
     @synchronized(self) {
         if (self.crawling) return;
         self.crawling = YES;
+        self.cancelRequested = NO;
+        self.activeKey = key;
+        if (startItem) { self.subSid = [key componentsSeparatedByString:@"|"].firstObject; self.subPath = SFStr0(startItem, @"path") ?: @""; }
+        else { self.subSid = nil; self.subPath = nil; }
     }
     self.progFraction = 0; self.progSource = nil;
     dispatch_group_enter(self.crawlGroup);
     dispatch_async(self.crawlQueue, ^{
         BOOL ok = NO;
         @try {
-            @autoreleasepool { ok = [self crawlOnly:only]; }
+            @autoreleasepool { ok = [self crawlOnly:only startItem:startItem]; }
         } @catch (NSException *e) {
             SFLog(@"[index] loi: %@", e);
             self.diagText = [NSString stringWithFormat:@"Ngoai le khi quet: %@", e];
@@ -366,19 +374,66 @@ void SFShowText(NSString *title, NSString *text) {
         BOOL retry = NO;
         @synchronized(self) {
             self.crawling = NO;
+            self.subSid = nil; self.subPath = nil; self.activeKey = nil;
             if (ok) { self.lastCrawl = [NSDate date]; self.crawlRetries = 0; }
-            else if (self.crawlRetries < 6) { self.crawlRetries++; retry = YES; }
+            else if (self.crawlRetries < 6 && !self.cancelRequested) { self.crawlRetries++; retry = YES; }
             else self.lastCrawl = [NSDate date];
         }
+        [self saveIndex];
         dispatch_group_leave(self.crawlGroup);
         if (retry) {
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(4 * NSEC_PER_SEC)), self.crawlQueue, ^{ [self startCrawlOnly:only]; });
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(4 * NSEC_PER_SEC)), self.crawlQueue, ^{ [self startCrawlOnly:only startItem:startItem key:key]; });
         }
     });
 }
 
-- (void)refreshAll { [self startCrawlOnly:nil]; }
-- (void)refreshSource:(NSString *)sid { if (sid.length) [self startCrawlOnly:[NSSet setWithObject:sid]]; }
+- (void)refreshAll { [self startCrawlOnly:nil startItem:nil key:nil]; }
+- (void)refreshSource:(NSString *)sid { if (sid.length) [self startCrawlOnly:[NSSet setWithObject:sid] startItem:nil key:sid]; }
+- (void)refreshFolderItem:(id)item source:(NSString *)sid {
+    NSString *path = SFStr0(item, @"path") ?: @"";
+    [self startCrawlOnly:[NSSet setWithObject:sid] startItem:item key:[NSString stringWithFormat:@"%@|%@", sid, path]];
+}
+- (void)cancelCrawl { self.cancelRequested = YES; }
+- (NSString *)activeKeyValue { @synchronized(self) { return self.crawling ? (self.activeKey ?: @"*") : nil; } }
+
+// Thu muc con (chi thu muc) cua mot item: goi tu luong nen. Moi phan tu: name, path, item, subs.
+- (NSArray<NSDictionary *> *)childFoldersOfItem:(id)item source:(NSString *)sid {
+    id vfs = [self vfsForSourceId:sid];
+    id browser = SFObj0(vfs, @"browser");
+    SEL fs = NSSelectorFromString(@"fetchChildrenForItem:outError:");
+    if (!item || ![browser respondsToSelector:fs]) return @[];
+    NSError *__autoreleasing err = nil;
+    BOOL ok = NO;
+    @try { ok = ((BOOL (*)(id, SEL, id, NSError **))objc_msgSend)(browser, fs, item, &err); } @catch (NSException *e) { ok = NO; }
+    if (!ok) return @[];
+    id lock = SFObj0(item, @"childItemsLockObject");
+    NSArray *children;
+    @synchronized(lock ?: self) { children = [SFArr0(item, @"childItems") copy]; }
+    NSMutableArray *out = [NSMutableArray array];
+    NSSet *exts = [NSSet setWithArray:(NSArray *)self.config[@"extensions"]];
+    for (id c in children) {
+        NSString *name = SFStr0(c, @"fileName");
+        if (!name.length) continue;
+        NSString *ext = [(SFStr0(c, @"fileExtension") ?: name.pathExtension) lowercaseString];
+        if ([exts containsObject:ext] || ![self isFolderItem:c]) continue;
+        NSString *p = SFStr0(c, @"path") ?: @"";
+        [out addObject:@{ @"name": SFTrimSlash(name), @"path": p, @"item": c, @"subs": @([self subCountForSource:sid pathPrefix:p]) }];
+    }
+    [out sortUsingComparator:^NSComparisonResult(NSDictionary *a, NSDictionary *b) { return [a[@"name"] localizedStandardCompare:b[@"name"]]; }];
+    return out;
+}
+- (id)rootItemForSource:(NSString *)sid { return SFObj0([self vfsForSourceId:sid], @"makeRootItem"); }
+- (NSInteger)subCountForSource:(NSString *)sid pathPrefix:(NSString *)p {
+    NSArray<SFSubEntry *> *idx;
+    @synchronized(self) { idx = self.index; }
+    NSInteger n = 0;
+    NSString *pp = [p stringByAppendingString:@"/"];
+    for (SFSubEntry *e in idx) {
+        if (![e.sourceId isEqualToString:sid]) continue;
+        if (!p.length || [e.folderPath isEqualToString:p] || [e.folderPath hasPrefix:pp]) n++;
+    }
+    return n;
+}
 
 // ---- cai dat nguoi dung (settings.json)
 
@@ -393,8 +448,22 @@ void SFShowText(NSString *title, NSString *text) {
     @synchronized(self) { d = [NSJSONSerialization dataWithJSONObject:self.settings options:0 error:nil]; }
     if (d) [d writeToFile:[self settingsPath] atomically:YES];
 }
+- (id)vfsForSourceId:(NSString *)sid {
+    id mgr = SFObj0(NSClassFromString(@"VFSManager"), @"sharedManager");
+    for (id v in SFArr0(mgr, @"allVFSs")) {
+        if ([(SFStr0(v, @"identifier") ?: SFStr0(v, @"name")) isEqualToString:sid]) return v;
+    }
+    return nil;
+}
+- (BOOL)isCloudSource:(NSString *)sid {
+    id mgr = SFObj0(NSClassFromString(@"VFSManager"), @"sharedManager");
+    id v = [self vfsForSourceId:sid];
+    return v && [SFArr0(mgr, @"cloudVFSs") containsObject:v];
+}
 - (BOOL)isSourceDisabled:(NSString *)sid {
-    @synchronized(self) { return [(NSArray *)self.settings[@"disabled"] containsObject:sid]; }
+    @synchronized(self) { if ([(NSArray *)self.settings[@"disabled"] containsObject:sid]) return YES; }
+    if ([self isCloudSource:sid]) @synchronized(self) { return ![(NSArray *)self.settings[@"cloudOn"] containsObject:sid]; }
+    return NO;
 }
 - (void)setSource:(NSString *)sid enabled:(BOOL)on {
     @synchronized(self) {
@@ -402,6 +471,10 @@ void SFShowText(NSString *title, NSString *text) {
         [a removeObject:sid];
         if (!on) [a addObject:sid];
         self.settings[@"disabled"] = a;
+        NSMutableArray *c = [(NSArray *)self.settings[@"cloudOn"] mutableCopy] ?: [NSMutableArray array];
+        [c removeObject:sid];
+        if (on) [c addObject:sid];
+        self.settings[@"cloudOn"] = c;
     }
     [self saveSettings];
 }
@@ -423,7 +496,9 @@ void SFShowText(NSString *title, NSString *text) {
         NSInteger n = 0;
         for (SFSubEntry *e in idx) if ([e.sourceId isEqualToString:sid]) n++;
         NSNumber *last = ((NSDictionary *)self.settings[@"last"])[sid];
-        [out addObject:@{ @"id": sid, @"name": name, @"subs": @(n), @"enabled": @(![self isSourceDisabled:sid]), @"last": last ?: @0 }];
+        [out addObject:@{ @"id": sid, @"name": name, @"subs": @(n), @"enabled": @(![self isSourceDisabled:sid]), @"last": last ?: @0,
+                          @"kind": NSStringFromClass([v class]), @"cloud": @([self isCloudSource:sid]),
+                          @"root": SFStr0(v, @"rootPath") ?: @"" }];
     }
     return out;
 }
@@ -438,6 +513,12 @@ void SFShowText(NSString *title, NSString *text) {
     @synchronized(self) {
         NSMutableArray *merged = [result mutableCopy];
         for (SFSubEntry *old in self.index) {
+            if (self.subSid) {   // lam moi mot thu muc: chi thay phan thuoc thu muc do
+                BOOL inSub = [old.sourceId isEqualToString:self.subSid] &&
+                    ([old.folderPath isEqualToString:self.subPath] || [old.folderPath hasPrefix:[self.subPath stringByAppendingString:@"/"]]);
+                if (!inSub) [merged addObject:old];
+                continue;
+            }
             if ([crawled containsObject:old.sourceId] || [cur isEqualToString:old.sourceId]) continue;
             if (![allIds containsObject:old.sourceId]) continue;
             [merged addObject:old];
@@ -449,7 +530,9 @@ void SFShowText(NSString *title, NSString *text) {
 // Tra ve NO neu VFS chua san sang (se thu lai).
 - (BOOL)crawlAll { return [self crawlOnly:nil]; }
 
-- (BOOL)crawlOnly:(NSSet *)only {
+- (BOOL)crawlOnly:(NSSet *)only { return [self crawlOnly:only startItem:nil]; }
+
+- (BOOL)crawlOnly:(NSSet *)only startItem:(id)startItem {
     Class mgrCls = NSClassFromString(@"VFSManager");
     id mgr = SFObj0(mgrCls, @"sharedManager");
     NSArray *all = SFArr0(mgr, @"allVFSs");
@@ -502,11 +585,12 @@ void SFShowText(NSString *title, NSString *text) {
             continue;
         }
         NSString *srcId = SFStr0(vfs, @"identifier") ?: srcName;
+        if (self.cancelRequested) break;
         if (only ? ![only containsObject:srcId] : [self isSourceDisabled:srcId]) continue;
         sourcesDone++;
         self.progSource = srcName;
         self.progFolders = 0;
-        id root = SFObj0(vfs, @"makeRootItem");
+        id root = startItem ?: SFObj0(vfs, @"makeRootItem");
         id browser = SFObj0(vfs, @"browser");
         if (!root || !browser || ![browser respondsToSelector:fetchSel]) {
             SFLog(@"[index] bo qua nguon '%@' (root=%d browser=%d)", srcName, root != nil, browser != nil);
@@ -515,7 +599,7 @@ void SFShowText(NSString *title, NSString *text) {
         }
 
         NSDate *srcStart = [NSDate date];
-        {   // nguon chi dinh thang mot file sub: root chinh la file do
+        if (!startItem) {   // nguon chi dinh thang mot file sub: root chinh la file do
             NSString *rn = SFStr0(root, @"fileName");
             NSString *re = [(SFStr0(root, @"fileExtension") ?: rn.pathExtension) lowercaseString];
             if (rn.length && [exts containsObject:re] && sf_is_subtitle_ext(re.UTF8String)) {
@@ -536,6 +620,7 @@ void SFShowText(NSString *title, NSString *text) {
         NSMutableArray *sampleNames = [NSMutableArray array];
         NSString *firstErr = nil;
         while (head < queue.count) {
+            if (self.cancelRequested) { SFLog(@"[index] da huy"); break; }
             if (-[srcStart timeIntervalSinceNow] > budget || folders >= maxFolders) {
                 SFLog(@"[index] '%@' dat gioi han (folders=%ld, %.0fs), dung som", srcName, (long)folders,
                       -[srcStart timeIntervalSinceNow]);

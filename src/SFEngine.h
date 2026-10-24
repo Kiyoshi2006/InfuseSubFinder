@@ -9,7 +9,7 @@ void SFToast(NSString *text);
 void SFShowText(NSString *title, NSString *text);
 void SFInstallUI(void);
 BOOL SFInstallSettingsHook(void);
-void SFTogglePanel(void);   // nut ISF noi + bang cai dat (SFUI.m)  // thong bao nho tren man hinh (main thread tu dispatch)
+void SFOpenSettings(id settingsController);   // nut ISF noi + bang cai dat (SFUI.m)  // thong bao nho tren man hinh (main thread tu dispatch)
 #ifdef __cplusplus
 }
 #endif
@@ -25,6 +25,12 @@ void SFTogglePanel(void);   // nut ISF noi + bang cai dat (SFUI.m)  // thong bao
 - (NSArray *)relatedItemsForMediaFile:(id)mediaFile original:(NSArray *)orig;
 
 - (BOOL)isCrawling;
+- (void)refreshFolderItem:(id)item source:(NSString *)sourceId;
+- (void)cancelCrawl;
+- (NSString *)activeKeyValue;   // nil = khong quet; "*" = tat ca; "sid"; "sid|path"
+- (NSArray<NSDictionary *> *)childFoldersOfItem:(id)item source:(NSString *)sourceId;
+- (id)rootItemForSource:(NSString *)sourceId;
+- (NSInteger)subCountForSource:(NSString *)sourceId pathPrefix:(NSString *)path;
 - (BOOL)floatingButton;
 - (void)refreshAll;
 - (void)refreshSource:(NSString *)sourceId;
