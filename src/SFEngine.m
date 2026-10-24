@@ -371,8 +371,17 @@ void SFShowText(NSString *title, NSString *text) {
 
     if ([self boolCfg:@"showToast"] && !self.toastedIndex) SFToast([NSString stringWithFormat:@"ISF: đang quét %lu nguồn...", (unsigned long)all.count]);
 
+    // Uu tien nguon nhanh/noi bo (iPhone, bookmark) truoc, mang (WebDAV/FTP/SMB) sau.
+    all = [all sortedArrayUsingComparator:^NSComparisonResult(id x, id y) {
+        NSString *cx = NSStringFromClass([x class]), *cy = NSStringFromClass([y class]);
+        int rx = [cx isEqualToString:@"VFSBookmarks"] ? 0 : ([cx isEqualToString:@"VFSLocal"] ? 1 : 2);
+        int ry = [cy isEqualToString:@"VFSBookmarks"] ? 0 : ([cy isEqualToString:@"VFSLocal"] ? 1 : 2);
+        if (rx != ry) return rx < ry ? NSOrderedAscending : NSOrderedDescending;
+        return NSOrderedSame;
+    }];
     NSInteger sourcesDone = 0;
     for (id vfs in all) {
+        if ([(SFStr0(vfs, @"name") ?: @"") isEqualToString:@"vfLocalFiles"]) continue;  // thu muc noi bo cua app, 16000 file khong co sub
         NSString *srcName = SFStr0(vfs, @"name") ?: @"?";
         NSString *cls = NSStringFromClass([vfs class]);
         long proto = -1;
@@ -479,6 +488,7 @@ void SFShowText(NSString *title, NSString *text) {
          srcName, cls, proto, (long)folders, (long)files, (long)subs, (long)failed, -[srcStart timeIntervalSinceNow],
          [extParts componentsJoinedByString:@" "], [sampleNames componentsJoinedByString:@" | "]];
         if (firstErr) [diag appendFormat:@"    loi dau tien: %@\n", firstErr];
+        @synchronized(self) { self.index = [result copy]; }   // dung duoc ngay, khong doi quet het cac nguon
     }
 
     @synchronized(self) { self.index = result; self.sourcesCrawled = sourcesDone; }
@@ -499,6 +509,24 @@ void SFShowText(NSString *title, NSString *text) {
 }
 
 // ---------------------------------------------------------------- khop + nhap
+
+// Cho den khi index thay doi (them nguon moi) hoac quet xong, roi khop lai cho video nay.
+- (void)scheduleRetryForMedia:(id)mf key:(NSString *)key knownCount:(NSUInteger)known {
+    @synchronized(self) {
+        if ([self.pendingRetry containsObject:key]) return;
+        [self.pendingRetry addObject:key];
+    }
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        for (int i = 0; i < 300; i++) {   // toi da ~10 phut
+            [NSThread sleepForTimeInterval:2];
+            BOOL crawling; NSUInteger cnt;
+            @synchronized(self) { crawling = self.crawling; cnt = self.index.count; }
+            if (cnt != known || !crawling) break;
+        }
+        @synchronized(self) { [self.pendingRetry removeObject:key]; [self.lastPrepared removeObjectForKey:key]; }
+        [self prepareSubtitlesForMediaFile:mf];
+    });
+}
 
 - (void)prepareSubtitlesForMediaFile:(id)mf {
     NSString *status = [self prepareInternal:mf];
@@ -546,17 +574,7 @@ void SFShowText(NSString *title, NSString *text) {
             self.diagShown = YES;
             SFShowText(@"ISF chẩn đoán: index sub trống (chụp màn hình gửi tao)", self.diagText);
         }
-        if (stillCrawling) {
-            // quet xong thi tu chay lai cho video nay (khong can mo lai video)
-            BOOL first;
-            @synchronized(self) { first = ![self.pendingRetry containsObject:key]; if (first) [self.pendingRetry addObject:key]; }
-            if (first) {
-                dispatch_group_notify(self.crawlGroup, dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-                    @synchronized(self) { [self.pendingRetry removeObject:key]; [self.lastPrepared removeObjectForKey:key]; }
-                    [self prepareSubtitlesForMediaFile:mf];
-                });
-            }
-        }
+        if (stillCrawling) [self scheduleRetryForMedia:mf key:key knownCount:0];
         return [NSString stringWithFormat:@"ISF: '%@' — index sub trống (%@)", vName, stillCrawling ? @"đang quét, thử lại sau ít giây" : @"quét xong nhưng không thấy sub"];
     }
     }
@@ -593,6 +611,12 @@ void SFShowText(NSString *title, NSString *text) {
     SFLog(@"[match] '%@' (thu muc '%@'): %lu ung vien / %lu sub, %.0fms", vName, vFolder, (unsigned long)cands.count,
           (unsigned long)index.count, -[t0 timeIntervalSinceNow] * 1000);
     if (cands.count == 0) {
+        BOOL crawlingNow;
+        @synchronized(self) { crawlingNow = self.crawling; [self.lastPrepared removeObjectForKey:key]; }
+        if (crawlingNow) {
+            [self scheduleRetryForMedia:mf key:key knownCount:index.count];
+            return [NSString stringWithFormat:@"ISF: '%@' — mới quét %lu sub, chưa khớp; đang quét tiếp các nguồn còn lại...", vName, (unsigned long)index.count];
+        }
         [self showNoMatchDiagForVideo:vName folder:vFolder parentPath:vParentPath source:movieSource index:index skipSame:nSkipSame low:nLow];
         return [NSString stringWithFormat:@"ISF: '%@' — index %lu sub, không sub nào khớp (cùng thư mục: %ld, điểm thấp: %ld)", vName,
                 (unsigned long)index.count, (long)nSkipSame, (long)nLow];
