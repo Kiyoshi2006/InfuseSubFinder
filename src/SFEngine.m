@@ -176,6 +176,8 @@ void SFShowText(NSString *title, NSString *text) {
 @property (nonatomic, copy) NSString *folderPath;
 @property (nonatomic, copy) NSString *sourceId;
 @property (nonatomic, copy) NSString *sourceName;
+@property (nonatomic, copy) NSString *itemClass;
+@property (nonatomic, copy) NSString *itemPath;
 @end
 @implementation SFSubEntry
 @end
@@ -227,6 +229,7 @@ void SFShowText(NSString *title, NSString *text) {
         _inFlight = [NSMutableSet set];
         _index = @[];
         [self loadConfig];
+        [self loadIndexFromDisk];
     }
     return self;
 }
@@ -245,7 +248,7 @@ void SFShowText(NSString *title, NSString *text) {
         @"maxDepth": @8,
         @"maxFoldersPerSource": @4000,
         @"sourceBudgetSeconds": @180,
-        @"rescanMinutes": @30,
+        @"rescanHours": @12,
         @"waitIndexSeconds": @12,
         @"downloadTimeoutSeconds": @15,
         @"includeCloudSources": @NO,
@@ -317,7 +320,7 @@ void SFShowText(NSString *title, NSString *text) {
 
 - (void)startIndexingIfNeeded {
     if (![self boolCfg:@"enabled"]) return;
-    NSTimeInterval maxAge = MAX(1, [self intCfg:@"rescanMinutes"]) * 60.0;
+    NSTimeInterval maxAge = MAX(1, [self intCfg:@"rescanHours"]) * 3600.0;
     @synchronized(self) {
         if (self.crawling) return;
         if (self.lastCrawl && -[self.lastCrawl timeIntervalSinceNow] < maxAge) return;
@@ -369,7 +372,6 @@ void SFShowText(NSString *title, NSString *text) {
     NSTimeInterval budget = [self intCfg:@"sourceBudgetSeconds"];
     SEL fetchSel = NSSelectorFromString(@"fetchChildrenForItem:outError:");
 
-    if ([self boolCfg:@"showToast"] && !self.toastedIndex) SFToast([NSString stringWithFormat:@"ISF: đang quét %lu nguồn...", (unsigned long)all.count]);
 
     // Uu tien nguon nhanh/noi bo (iPhone, bookmark) truoc, mang (WebDAV/FTP/SMB) sau.
     all = [all sortedArrayUsingComparator:^NSComparisonResult(id x, id y) {
@@ -379,6 +381,7 @@ void SFShowText(NSString *title, NSString *text) {
         if (rx != ry) return rx < ry ? NSOrderedAscending : NSOrderedDescending;
         return NSOrderedSame;
     }];
+    NSMutableSet *crawledIds = [NSMutableSet set];
     NSInteger sourcesDone = 0;
     for (id vfs in all) {
         if ([(SFStr0(vfs, @"name") ?: @"") isEqualToString:@"vfLocalFiles"]) continue;  // thu muc noi bo cua app, 16000 file khong co sub
@@ -410,6 +413,7 @@ void SFShowText(NSString *title, NSString *text) {
                 e.folderName = SFTrimSlash(SFStr0(SFObj0(root, @"parent"), @"fileName") ?: srcName);
                 e.folderPath = SFStr0(SFObj0(root, @"parent"), @"path") ?: @"";
                 e.sourceId = srcId; e.sourceName = srcName;
+                e.itemClass = NSStringFromClass([root class]); e.itemPath = SFStr0(root, @"path");
                 [result addObject:e];
                 [diag appendFormat:@"  (root la file sub: %@)\n", rn];
             }
@@ -475,6 +479,8 @@ void SFShowText(NSString *title, NSString *text) {
                 e.folderPath = folderPath;
                 e.sourceId = srcId;
                 e.sourceName = srcName;
+                e.itemClass = NSStringFromClass([child class]);
+                e.itemPath = SFStr0(child, @"path");
                 [result addObject:e];
                 subs++;
             }
@@ -488,10 +494,16 @@ void SFShowText(NSString *title, NSString *text) {
          srcName, cls, proto, (long)folders, (long)files, (long)subs, (long)failed, -[srcStart timeIntervalSinceNow],
          [extParts componentsJoinedByString:@" "], [sampleNames componentsJoinedByString:@" | "]];
         if (firstErr) [diag appendFormat:@"    loi dau tien: %@\n", firstErr];
-        @synchronized(self) { self.index = [result copy]; }   // dung duoc ngay, khong doi quet het cac nguon
+        [crawledIds addObject:srcId];
+        @synchronized(self) {   // dung duoc ngay; giu muc cu cua nguon chua quet toi
+            NSMutableArray *merged = [result mutableCopy];
+            for (SFSubEntry *old in self.index) if (![crawledIds containsObject:old.sourceId]) [merged addObject:old];
+            self.index = merged;
+        }
     }
 
-    @synchronized(self) { self.index = result; self.sourcesCrawled = sourcesDone; }
+    @synchronized(self) { self.index = [result copy]; self.sourcesCrawled = sourcesDone; }
+    [self saveIndex];
     [diag appendFormat:@"=> %lu sub, %ld nguon duoc quet, %.1fs\n", (unsigned long)result.count, (long)sourcesDone, -[t0 timeIntervalSinceNow]];
     for (NSUInteger i = 0; i < MIN((NSUInteger)5, result.count); i++) [diag appendFormat:@"   vd: %@ (thu muc: %@)\n", result[i].name, result[i].folderName];
     self.diagText = diag;
@@ -501,272 +513,131 @@ void SFShowText(NSString *title, NSString *text) {
     if (show) {
         self.diagShown = YES;
         SFShowText(@"ISF chẩn đoán: quét nguồn (chụp màn hình gửi tao)", diag);
-    } else if (!self.toastedIndex && [self boolCfg:@"showToast"]) {
-        SFToast([NSString stringWithFormat:@"ISF: quét xong %lu sub từ %ld nguồn", (unsigned long)result.count, (long)sourcesDone]);
     }
     self.toastedIndex = YES;
     return YES;
 }
 
-// ---------------------------------------------------------------- khop + nhap
+// ---------------------------------------------------------------- chi muc tren dia
 
-// Cho den khi index thay doi (them nguon moi) hoac quet xong, roi khop lai cho video nay.
-- (void)scheduleRetryForMedia:(id)mf key:(NSString *)key knownCount:(NSUInteger)known {
-    @synchronized(self) {
-        if ([self.pendingRetry containsObject:key]) return;
-        [self.pendingRetry addObject:key];
+- (NSString *)indexPath { return [SFSupportDir() stringByAppendingPathComponent:@"index.json"]; }
+
+- (void)saveIndex {
+    NSArray *idx;
+    @synchronized(self) { idx = self.index; }
+    NSMutableArray *arr = [NSMutableArray array];
+    for (SFSubEntry *e in idx) {
+        if (!e.itemPath.length) continue;
+        [arr addObject:@{ @"sid": e.sourceId ?: @"", @"sn": e.sourceName ?: @"", @"cls": e.itemClass ?: @"", @"p": e.itemPath,
+                          @"n": e.name ?: @"", @"x": e.ext ?: @"", @"fn": e.folderName ?: @"", @"fp": e.folderPath ?: @"" }];
     }
-    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-        for (int i = 0; i < 300; i++) {   // toi da ~10 phut
-            [NSThread sleepForTimeInterval:2];
-            BOOL crawling; NSUInteger cnt;
-            @synchronized(self) { crawling = self.crawling; cnt = self.index.count; }
-            if (cnt != known || !crawling) break;
-        }
-        @synchronized(self) { [self.pendingRetry removeObject:key]; [self.lastPrepared removeObjectForKey:key]; }
-        [self prepareSubtitlesForMediaFile:mf];
-    });
+    NSData *d = [NSJSONSerialization dataWithJSONObject:arr options:0 error:nil];
+    if (d) [d writeToFile:[self indexPath] atomically:YES];
 }
 
-- (void)prepareSubtitlesForMediaFile:(id)mf {
-    NSString *status = [self prepareInternal:mf];
-    if (status.length) {
-        SFLog(@"[status] %@", status);
-        if ([self boolCfg:@"showToast"]) SFToast(status);
+- (void)loadIndexFromDisk {
+    NSData *d = [NSData dataWithContentsOfFile:[self indexPath]];
+    if (!d) return;
+    NSArray *arr = [NSJSONSerialization JSONObjectWithData:d options:0 error:nil];
+    if (![arr isKindOfClass:[NSArray class]]) return;
+    NSMutableArray *out = [NSMutableArray array];
+    for (NSDictionary *r in arr) {
+        if (![r isKindOfClass:[NSDictionary class]]) continue;
+        SFSubEntry *e = [[SFSubEntry alloc] init];
+        e.sourceId = r[@"sid"]; e.sourceName = r[@"sn"]; e.itemClass = r[@"cls"]; e.itemPath = r[@"p"];
+        e.name = r[@"n"]; e.ext = r[@"x"]; e.folderName = r[@"fn"]; e.folderPath = r[@"fp"];
+        [out addObject:e];
     }
+    NSDate *mt = [[[NSFileManager defaultManager] attributesOfItemAtPath:[self indexPath] error:nil] fileModificationDate];
+    @synchronized(self) { self.index = out; self.lastCrawl = mt; }
+    SFLog(@"[index] nap %lu sub tu dia (quet lan cuoi: %@)", (unsigned long)out.count, mt);
 }
 
-// Tra ve dong trang thai de hien cho nguoi dung (nil = im lang).
-- (NSString *)prepareInternal:(id)mf {
-    if (![self boolCfg:@"enabled"]) return nil;
-    if (!mf) return @"ISF: hook chạy nhưng không có FCMediaFile";
-    if (!SFBool0(mf, @"canHaveExternalSubtitles")) return @"ISF: video này không nhận sub ngoài (canHaveExternalSubtitles = NO)";
+// Dung lai VFSItem cua file sub (khong can quet lai nguon).
+- (id)itemForEntry:(SFSubEntry *)e {
+    if (e.item) return e.item;
+    id mgr = SFObj0(NSClassFromString(@"VFSManager"), @"sharedManager");
+    id vfs = nil;
+    for (id v in SFArr0(mgr, @"allVFSs")) {
+        if ([(SFStr0(v, @"identifier") ?: SFStr0(v, @"name")) isEqualToString:e.sourceId]) { vfs = v; break; }
+    }
+    Class cls = NSClassFromString(e.itemClass) ?: NSClassFromString(@"VFSItem");
+    SEL initSel = NSSelectorFromString(@"initWithVFS:path:");
+    if (!vfs || !cls || !e.itemPath.length || ![cls instancesRespondToSelector:initSel]) return nil;
+    id item = ((id (*)(id, SEL, id, id))objc_msgSend)([cls alloc], initSel, vfs, e.itemPath);
+    e.item = item;
+    return item;
+}
 
+// ---------------------------------------------------------------- gan sub vao danh sach "cung thu muc" cua Infuse
+
+static const void *kSFAttachedKey = &kSFAttachedKey;
+
+// Goi tu hook -[FCMediaFile relatedItems]: tra ve danh sach goc + sub khop o noi khac.
+// Infuse xu ly cac muc them vao nhu sub nam chung thu muc voi video.
+- (NSArray *)relatedItemsForMediaFile:(id)mf original:(NSArray *)orig {
+    if (![self boolCfg:@"enabled"] || !mf) return orig;
+    NSArray *cached = objc_getAssociatedObject(mf, kSFAttachedKey);
+    if (cached) return cached;
+    NSArray *result = orig;
+    @try { result = [self buildRelatedItemsForMediaFile:mf original:orig] ?: orig; }
+    @catch (NSException *e) { SFLog(@"[related] ngoai le: %@", e); }
+    objc_setAssociatedObject(mf, kSFAttachedKey, result, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    return result;
+}
+
+- (NSArray *)buildRelatedItemsForMediaFile:(id)mf original:(NSArray *)orig {
+    if (!SFBool0(mf, @"canHaveExternalSubtitles")) return orig;
     id movie = SFObj0(mf, @"movieItem");
-    id itemID = SFObj0(movie, @"itemIDObj");
     NSString *vName = SFStr0(movie, @"fileName");
-    if (!movie || !itemID || !vName.length)
-        return [NSString stringWithFormat:@"ISF: thiếu thông tin video (movieItem=%d itemID=%d tên=%d)", movie != nil, itemID != nil, vName.length > 0];
-    NSString *key = SFStr0(itemID, @"hashString") ?: [itemID description];
+    if (!movie || !vName.length) return orig;
 
-    // Infuse goi ham nay nhieu lan khi mo mot video: chi lam 1 lan / 20 giay.
-    @synchronized(self) {
-        NSDate *last = self.lastPrepared[key];
-        if (last && -[last timeIntervalSinceNow] < 20) return nil;
-        self.lastPrepared[key] = [NSDate date];
-        if (self.lastPrepared.count > 200) [self.lastPrepared removeAllObjects];
-    }
-
-    BOOL onMain = [NSThread isMainThread];
-    [self startIndexingIfNeeded];
-    NSArray<SFSubEntry *> *index;
-    @synchronized(self) { index = self.index; }
-    if (index.count == 0 && !onMain) {
-        NSTimeInterval wait = [self intCfg:@"waitIndexSeconds"];
-        dispatch_group_wait(self.crawlGroup, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(wait * NSEC_PER_SEC)));
-        @synchronized(self) { index = self.index; }
-    }
-    if (index.count == 0) {
-    {
-        BOOL stillCrawling;
-        @synchronized(self) { stillCrawling = self.crawling; [self.lastPrepared removeObjectForKey:key]; }
-        if (!stillCrawling && self.diagText.length && !self.diagShown) {
-            self.diagShown = YES;
-            SFShowText(@"ISF chẩn đoán: index sub trống (chụp màn hình gửi tao)", self.diagText);
-        }
-        if (stillCrawling) [self scheduleRetryForMedia:mf key:key knownCount:0];
-        return [NSString stringWithFormat:@"ISF: '%@' — index sub trống (%@)", vName, stillCrawling ? @"đang quét, thử lại sau ít giây" : @"quét xong nhưng không thấy sub"];
-    }
-    }
-
-    id movieParent = SFObj0(movie, @"parent");
-    NSString *vFolder = SFTrimSlash(SFStr0(movieParent, @"fileName") ?: @"");
-    NSString *vParentPath = SFStr0(movieParent, @"path");
-    id movieVFS = SFObj0(movie, @"VFS");
-    NSString *movieSource = SFStr0(movieVFS, @"identifier");
+    id parent = SFObj0(movie, @"parent");
+    NSString *vFolder = SFTrimSlash(SFStr0(parent, @"fileName") ?: @"");
+    NSString *vParentPath = SFStr0(parent, @"path");
+    NSString *movieSource = SFStr0(SFObj0(movie, @"VFS"), @"identifier");
     BOOL skipSame = [self boolCfg:@"skipSameFolder"];
     int minScore = (int)[self intCfg:@"minScore"];
     NSArray *langFilter = self.config[@"languages"];
+    NSArray<SFSubEntry *> *index;
+    @synchronized(self) { index = self.index; }
+    if (index.count == 0) { SFLog(@"[related] '%@': chua co chi muc sub", vName); return orig; }
 
     NSMutableArray<SFCandidate *> *cands = [NSMutableArray array];
-    NSDate *t0 = [NSDate date];
-    NSInteger nSkipSame = 0, nLow = 0;
     for (SFSubEntry *e in index) {
-        if (skipSame && vParentPath && movieSource && [e.sourceId isEqualToString:movieSource] &&
-            [e.folderPath isEqualToString:vParentPath]) {
-            nSkipSame++;
-            continue;
-        }
+        if (skipSame && vParentPath && movieSource && [e.sourceId isEqualToString:movieSource] && [e.folderPath isEqualToString:vParentPath]) continue;
         int sc = sf_score(vName.UTF8String, vFolder.UTF8String, e.name.UTF8String, e.folderName.UTF8String);
-        if (sc < minScore) { nLow++; continue; }
+        if (sc < minScore) continue;
         const char *lang = sf_language_from_name(e.name.UTF8String);
         NSString *language = lang ? [NSString stringWithUTF8String:lang] : nil;
         if (langFilter.count > 0 && language && ![langFilter containsObject:language]) continue;
         SFCandidate *c = [[SFCandidate alloc] init];
-        c.entry = e;
-        c.score = sc;
-        c.language = language;
+        c.entry = e; c.score = sc; c.language = language;
         [cands addObject:c];
     }
-    SFLog(@"[match] '%@' (thu muc '%@'): %lu ung vien / %lu sub, %.0fms", vName, vFolder, (unsigned long)cands.count,
-          (unsigned long)index.count, -[t0 timeIntervalSinceNow] * 1000);
-    if (cands.count == 0) {
-        BOOL crawlingNow;
-        @synchronized(self) { crawlingNow = self.crawling; [self.lastPrepared removeObjectForKey:key]; }
-        if (crawlingNow) {
-            [self scheduleRetryForMedia:mf key:key knownCount:index.count];
-            return [NSString stringWithFormat:@"ISF: '%@' — mới quét %lu sub, chưa khớp; đang quét tiếp các nguồn còn lại...", vName, (unsigned long)index.count];
-        }
-        [self showNoMatchDiagForVideo:vName folder:vFolder parentPath:vParentPath source:movieSource index:index skipSame:nSkipSame low:nLow];
-        return [NSString stringWithFormat:@"ISF: '%@' — index %lu sub, không sub nào khớp (cùng thư mục: %ld, điểm thấp: %ld)", vName,
-                (unsigned long)index.count, (long)nSkipSame, (long)nLow];
-    }
-
     [cands sortUsingComparator:^NSComparisonResult(SFCandidate *a, SFCandidate *b) {
         if (a.score != b.score) return a.score > b.score ? NSOrderedAscending : NSOrderedDescending;
-        // cung diem: uu tien ngon ngu nam som trong danh sach `languages`
-        NSUInteger ia = a.language ? [langFilter indexOfObject:a.language] : NSNotFound;
-        NSUInteger ib = b.language ? [langFilter indexOfObject:b.language] : NSNotFound;
-        if (ia != ib) return ia < ib ? NSOrderedAscending : NSOrderedDescending;
         return [a.entry.name compare:b.entry.name];
     }];
-
     NSInteger maxPer = MAX(1, [self intCfg:@"maxPerVideo"]);
-    if ((NSInteger)cands.count > maxPer) [cands removeObjectsInRange:NSMakeRange((NSUInteger)maxPer, cands.count - (NSUInteger)maxPer)];
-
-    id cache = SFObj0(NSClassFromString(@"FCSubtitlesCache"), @"shared");
-    if (!cache) {
-        return @"ISF: không tìm thấy FCSubtitlesCache (Infuse đổi API?)";
-    }
-
-    // Sub da co san trong cache cua video nay (theo ten hien thi) thi bo qua.
-    NSMutableSet *existing = [NSMutableSet set];
-    SEL cachedSel = NSSelectorFromString(@"cachedSubtitlesForItemID:");
-    if ([cache respondsToSelector:cachedSel]) {
-        id arr = ((id (*)(id, SEL, id))objc_msgSend)(cache, cachedSel, itemID);
-        if ([arr isKindOfClass:[NSArray class]]) {
-            for (id it in (NSArray *)arr) {
-                NSString *n = SFStr0(it, @"userFriendlyName");
-                if (n) [existing addObject:n];
-            }
-        }
-    }
-
-    SFLog(@"[match] cache hien co: %@", existing);
-    dispatch_group_t done = dispatch_group_create();
-    __block NSInteger imported = 0;
+    NSMutableArray *added = [NSMutableArray array];
+    NSMutableSet *seen = [NSMutableSet set];
     for (SFCandidate *c in cands) {
-        if ([existing containsObject:c.entry.name]) continue;
-        NSString *flightKey = [NSString stringWithFormat:@"%@|%@|%@", key, c.entry.sourceId, c.entry.name];
-        @synchronized(self) {
-            if ([self.inFlight containsObject:flightKey]) continue;
-            [self.inFlight addObject:flightKey];
-        }
-        if (onMain) {   // chay ngay tai cho de sub co san truoc khi Infuse gom danh sach (tai file nho, chap nhan chan ngan)
-            BOOL ok = NO;
-            @try { @autoreleasepool { ok = [self importCandidate:c itemID:itemID cache:cache]; } }
-            @catch (NSException *e) { SFLog(@"[import] loi: %@", e); }
-            @synchronized(self) { [self.inFlight removeObject:flightKey]; if (ok) imported++; }
-            continue;
-        }
-        dispatch_group_enter(done);
-        dispatch_async(self.importQueue, ^{
-            BOOL ok = NO;
-            @try {
-                @autoreleasepool { ok = [self importCandidate:c itemID:itemID cache:cache]; }
-            } @catch (NSException *e) {
-                SFLog(@"[import] loi: %@", e);
-            }
-            @synchronized(self) {
-                [self.inFlight removeObject:flightKey];
-                if (ok) imported++;
-            }
-            dispatch_group_leave(done);
-        });
+        if ((NSInteger)added.count >= maxPer) break;
+        NSString *k = [NSString stringWithFormat:@"%@|%@", c.entry.sourceId, c.entry.itemPath];
+        if ([seen containsObject:k]) continue;
+        [seen addObject:k];
+        id item = [self itemForEntry:c.entry];
+        if (!item) { SFLog(@"[related] khong dung lai duoc item cho '%@'", c.entry.name); continue; }
+        [added addObject:item];
+        SFLog(@"[related] + %@ diem=%d (nguon '%@')", c.entry.name, c.score, c.entry.sourceName);
     }
-
-    if (!onMain) {
-        NSTimeInterval to = [self intCfg:@"downloadTimeoutSeconds"];
-        long r = dispatch_group_wait(done, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(to * NSEC_PER_SEC)));
-        if (r != 0) SFLog(@"[import] het %.0fs, tiep tuc phat; phan con lai tai nen", to);
-    }
-    NSInteger n;
-    @synchronized(self) { n = imported; }
-    if (n > 0) {
-        SEL inv = NSSelectorFromString(@"invalidateExternalSubtitlesCache");
-        if ([mf respondsToSelector:inv]) ((void (*)(id, SEL))objc_msgSend)(mf, inv);
-        SFLog(@"[import] da nap %ld sub cho '%@'", (long)n, vName);
-        return [NSString stringWithFormat:@"ISF: đã nạp %ld sub cho '%@' (khớp %lu)", (long)n, vName, (unsigned long)cands.count];
-    }
-    return [NSString stringWithFormat:@"ISF: '%@' khớp %lu sub nhưng nạp 0 (đã có sẵn hoặc tải lỗi), xem log", vName, (unsigned long)cands.count];
-}
-
-- (void)showNoMatchDiagForVideo:(NSString *)vName folder:(NSString *)vFolder parentPath:(NSString *)vParentPath
-                        source:(NSString *)movieSource index:(NSArray<SFSubEntry *> *)index skipSame:(NSInteger)nSkip low:(NSInteger)nLow {
-    static NSInteger shownCount = 0;
-    if (shownCount >= 3 && ![self boolCfg:@"diagnostic"]) return;
-    shownCount++;
-    char buf[320];
-    int vs = -1, ve = -1;
-    sf_describe(vName.UTF8String, buf, sizeof buf);
-    sf_parse_se(vName.UTF8String, &vs, &ve);
-    NSMutableString *d = [NSMutableString string];
-    [d appendFormat:@"VIDEO: %@\n  thu muc: %@\n  duong dan thu muc: %@\n  nguon: %@\n  phan tich: %s\n\n", vName, vFolder, vParentPath, movieSource, buf];
-    [d appendFormat:@"INDEX %lu sub | bo qua vi cung thu muc: %ld | diem < %ld: %ld\n\n", (unsigned long)index.count, (long)nSkip,
-     (long)[self intCfg:@"minScore"], (long)nLow];
-    // uu tien liet ke sub cung tap voi video, roi toi cac sub dau tien
-    NSMutableArray *ordered = [NSMutableArray array], *rest = [NSMutableArray array];
-    for (SFSubEntry *e in index) {
-        int s = -1, ep = -1;
-        sf_parse_se(e.name.UTF8String, &s, &ep);
-        if (ep >= 0 && ep == ve) [ordered addObject:e]; else [rest addObject:e];
-    }
-    [ordered addObjectsFromArray:rest];
-    NSUInteger shown = 0;
-    for (SFSubEntry *e in ordered) {
-        if (shown++ >= 10) break;
-        sf_describe(e.name.UTF8String, buf, sizeof buf);
-        [d appendFormat:@"- %@\n    thu muc: %@ | nguon: %@ (id %@)\n    duong dan thu muc: %@\n    phan tich: %s | diem: %d\n", e.name, e.folderName,
-         e.sourceName, e.sourceId, e.folderPath, buf, sf_score(vName.UTF8String, vFolder.UTF8String, e.name.UTF8String, e.folderName.UTF8String)];
-    }
-    SFLog(@"[diag] khong khop:\n%@", d);
-    if ([self boolCfg:@"showToast"]) SFShowText(@"ISF chẩn đoán: không sub nào khớp (chụp màn hình gửi tao)", d);
-}
-
-- (BOOL)importCandidate:(SFCandidate *)c itemID:(id)itemID cache:(id)cache {
-    NSString *dir = SFStr0(cache, @"cachePath");
-    if (!dir.length) { SFLog(@"[import] cache khong co cachePath"); return NO; }
-    NSFileManager *fm = [NSFileManager defaultManager];
-    [fm createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
-    NSString *local = [dir stringByAppendingPathComponent:[NSString stringWithFormat:@"%@.%@", [NSUUID UUID].UUIDString, c.entry.ext]];
-
-    Class net = NSClassFromString(@"FCNetworkUtils");
-    SEL copySel = NSSelectorFromString(@"copyRemoteItem:toLocalFilePath:");
-    if (!net || ![net respondsToSelector:copySel]) { SFLog(@"[import] khong co FCNetworkUtils copyRemoteItem"); return NO; }
-    NSDate *t0 = [NSDate date];
-    BOOL ok = ((BOOL (*)(id, SEL, id, id))objc_msgSend)(net, copySel, c.entry.item, local);
-    unsigned long long size = [[fm attributesOfItemAtPath:local error:nil] fileSize];
-    if (!ok || size == 0 || size > 8 * 1024 * 1024) {
-        SFLog(@"[import] tai '%@' that bai (ok=%d, size=%llu)", c.entry.name, ok, size);
-        [fm removeItemAtPath:local error:nil];
-        return NO;
-    }
-
-    // Y het luong "chia se file sub" cua Infuse (language = nil).
-    SEL saveSel = NSSelectorFromString(@"saveSubtitlesForItemID:subtitlesPath:language:name:date:");
-    if (![cache respondsToSelector:saveSel]) { SFLog(@"[import] cache khong co saveSubtitles..."); return NO; }
-    ((id (*)(id, SEL, id, id, id, id, id))objc_msgSend)(cache, saveSel, itemID, local, nil, c.entry.name, [NSDate date]);
-    {   // kiem tra: Infuse co thay sub vua luu khong?
-        SEL cs = NSSelectorFromString(@"cachedSubtitlesForItemID:");
-        id arr = [cache respondsToSelector:cs] ? ((id (*)(id, SEL, id))objc_msgSend)(cache, cs, itemID) : nil;
-        NSMutableArray *names = [NSMutableArray array];
-        if ([arr isKindOfClass:[NSArray class]])
-            for (id it in (NSArray *)arr) [names addObject:[NSString stringWithFormat:@"%@|%@|%@", SFStr0(it, @"userFriendlyName"), SFStr0(it, @"language"), SFStr0(it, @"subtitlesFileName")]];
-        SFLog(@"[import] sau khi luu, cache co %lu muc cho video: %@", (unsigned long)names.count, names);
-    }
-    SFLog(@"[import] + %@ [%@] diem=%d %llu byte, %.1fs (nguon '%@')", c.entry.name, c.language ?: @"?", c.score, size,
-          -[t0 timeIntervalSinceNow], c.entry.sourceName);
-    return YES;
+    SFLog(@"[related] '%@': %lu ung vien, gan %lu sub", vName, (unsigned long)cands.count, (unsigned long)added.count);
+    if (added.count == 0) return orig;
+    if ([self boolCfg:@"showToast"]) SFToast([NSString stringWithFormat:@"ISF: gắn %lu sub cho '%@'", (unsigned long)added.count, vName]);
+    NSMutableArray *out = [NSMutableArray arrayWithArray:orig ?: @[]];
+    [out addObjectsFromArray:added];
+    return out;
 }
 
 @end

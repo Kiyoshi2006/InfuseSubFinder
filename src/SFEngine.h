@@ -18,7 +18,7 @@ void SFShowText(NSString *title, NSString *text);  // thong bao nho tren man hin
 // Bat dau quet nen neu chua quet hoac da cu (theo cau hinh rescanMinutes).
 - (void)startIndexingIfNeeded;
 
-// Goi tu hook: tim sub khop voi video cua `mediaFile` (FCMediaFile) va nap vao cache cua Infuse.
-- (void)prepareSubtitlesForMediaFile:(id)mediaFile;
+// Goi tu hook -[FCMediaFile relatedItems]: them sub khop (o thu muc/nguon khac) vao danh sach file lien quan.
+- (NSArray *)relatedItemsForMediaFile:(id)mediaFile original:(NSArray *)orig;
 
 @end

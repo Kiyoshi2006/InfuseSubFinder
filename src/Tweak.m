@@ -1,7 +1,6 @@
 // InfuseSubFinder - dylib tiem vao Infuse (iOS).
-// Hook: -[FCMediaFile allExternalTracksOfType:] voi type = 4 (phu de). Truoc khi Infuse gom
-// danh sach sub ngoai, ta quet cac nguon, tim sub khop ten va nap vao cache sub cua Infuse
-// (cung co che nhu khi nguoi dung "chia se" file sub), nen sub hien trong menu chon sub.
+// Hook: -[FCMediaFile relatedItems]. Infuse dung danh sach nay (file cung thu muc voi video) de tim sub
+// ngoai. Ta them vao do cac sub khop ten o thu muc/nguon khac -> Infuse xu ly nhu sub cung thu muc.
 
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
@@ -9,19 +8,11 @@
 
 #import "SFEngine.h"
 
-static const NSUInteger kSFSubtitleTrackType = 4;
+static NSArray *(*sf_orig_relatedItems)(id, SEL);
 
-static id (*sf_orig_allExternalTracksOfType)(id, SEL, NSUInteger);
-
-static id sf_hooked_allExternalTracksOfType(id self, SEL _cmd, NSUInteger type) {
-    if (type == kSFSubtitleTrackType) {
-        @try {
-            [[SFEngine shared] prepareSubtitlesForMediaFile:self];
-        } @catch (NSException *e) {
-            SFLog(@"[hook] ngoai le: %@", e);
-        }
-    }
-    return sf_orig_allExternalTracksOfType(self, _cmd, type);
+static NSArray *sf_hooked_relatedItems(id self, SEL _cmd) {
+    NSArray *orig = sf_orig_relatedItems(self, _cmd);
+    return [[SFEngine shared] relatedItemsForMediaFile:self original:orig];
 }
 
 static BOOL sf_install_hooks(void) {
@@ -30,25 +21,24 @@ static BOOL sf_install_hooks(void) {
 
     Class cls = NSClassFromString(@"FCMediaFile");
     if (!cls) return NO;
-    SEL sel = NSSelectorFromString(@"allExternalTracksOfType:");
+    SEL sel = NSSelectorFromString(@"relatedItems");
     Method m = class_getInstanceMethod(cls, sel);
     if (!m) {
-        SFLog(@"[hook] FCMediaFile khong co allExternalTracksOfType: (Infuse doi API?)");
-        installed = YES;  // khong thu lai
+        SFLog(@"[hook] FCMediaFile khong co relatedItems (Infuse doi API?)");
+        installed = YES;
         return NO;
     }
-    sf_orig_allExternalTracksOfType = (id (*)(id, SEL, NSUInteger))method_getImplementation(m);
-    method_setImplementation(m, (IMP)sf_hooked_allExternalTracksOfType);
+    sf_orig_relatedItems = (NSArray *(*)(id, SEL))method_getImplementation(m);
+    method_setImplementation(m, (IMP)sf_hooked_relatedItems);
     installed = YES;
-
     NSString *ver = [NSBundle mainBundle].infoDictionary[@"CFBundleShortVersionString"];
-    SFLog(@"[hook] da hook FCMediaFile allExternalTracksOfType: (Infuse %@)", ver);
+    SFLog(@"[hook] da hook FCMediaFile relatedItems (Infuse %@)", ver);
     return YES;
 }
 
 static void sf_app_ready(void) {
     BOOL hooked = sf_install_hooks();
-    SFToast(hooked ? @"ISF v0.7: đã nạp, hook OK — đang quét sub..." : @"ISF v0.4: đã nạp nhưng HOOK LỖI (xem log)");
+    SFToast(hooked ? @"ISF v0.8: đã nạp, hook OK" : @"ISF v0.8: đã nạp nhưng HOOK LỖI (xem log)");
     [[SFEngine shared] startIndexingIfNeeded];
 }
 
