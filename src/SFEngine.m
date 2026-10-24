@@ -757,3 +757,6 @@ static const void *kSFAttachedKey = &kSFAttachedKey;
 }
 
 @end
+
+// Giao dien (gop vao cung file bien dich de workflow cu van build duoc)
+#include "SFUI.inc"
