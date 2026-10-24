@@ -26,7 +26,7 @@ jobs:
             -Wall -Wno-unused-parameter -Wno-deprecated-declarations \
             -framework Foundation -framework UIKit \
             -install_name @rpath/InfuseSubFinder.dylib \
-            -Isrc src/Tweak.m src/SFEngine.m src/SFMatch.c \
+            -Isrc src/Tweak.m src/SFEngine.m src/SFUI.m src/SFMatch.c \
             -o out/InfuseSubFinder.dylib
           xcrun strip -x out/InfuseSubFinder.dylib || true
 
