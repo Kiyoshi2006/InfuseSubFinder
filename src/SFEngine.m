@@ -86,17 +86,20 @@ void SFLog(NSString *format, ...) {
 
 // ------------------------------------------------------------------ thong bao tren man hinh
 
+static UIWindow *SFKeyWindow(void) {
+    for (UIScene *sc in [UIApplication sharedApplication].connectedScenes) {
+        if (![sc isKindOfClass:[UIWindowScene class]]) continue;
+        for (UIWindow *w in ((UIWindowScene *)sc).windows) {
+            if (w.isKeyWindow) return w;
+        }
+    }
+    return nil;
+}
+
 void SFToast(NSString *text) {
     if (!text.length) return;
     dispatch_async(dispatch_get_main_queue(), ^{
-        UIWindow *win = nil;
-        for (UIScene *sc in [UIApplication sharedApplication].connectedScenes) {
-            if (![sc isKindOfClass:[UIWindowScene class]]) continue;
-            for (UIWindow *w in ((UIWindowScene *)sc).windows) {
-                if (w.isKeyWindow) { win = w; break; }
-            }
-            if (win) break;
-        }
+        UIWindow *win = SFKeyWindow();
         if (!win) return;
         UILabel *l = [[UILabel alloc] init];
         l.numberOfLines = 0;
@@ -118,6 +121,48 @@ void SFToast(NSString *text) {
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(6 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             [UIView animateWithDuration:0.4 animations:^{ l.alpha = 0; } completion:^(BOOL f) { [l removeFromSuperview]; }];
         });
+    });
+}
+
+// Bang chan doan: noi dung cuon duoc, giu nguyen den khi bam "Dong" (de chup man hinh).
+void SFShowText(NSString *title, NSString *text) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        UIWindow *win = SFKeyWindow();
+        if (!win) return;
+        [[win viewWithTag:0x15F1] removeFromSuperview];
+        CGFloat top = MAX(win.safeAreaInsets.top, 12) + 4;
+        UIView *box = [[UIView alloc] initWithFrame:CGRectMake(12, top, win.bounds.size.width - 24, win.bounds.size.height - top - 12)];
+        box.tag = 0x15F1;
+        box.backgroundColor = [UIColor colorWithWhite:0.07 alpha:0.97];
+        box.layer.cornerRadius = 12;
+        box.layer.masksToBounds = YES;
+        box.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+
+        UILabel *t = [[UILabel alloc] initWithFrame:CGRectMake(12, 8, box.bounds.size.width - 100, 28)];
+        t.text = title;
+        t.textColor = [UIColor whiteColor];
+        t.font = [UIFont boldSystemFontOfSize:15];
+        t.autoresizingMask = UIViewAutoresizingFlexibleWidth;
+        [box addSubview:t];
+
+        UIButton *b = [UIButton buttonWithType:UIButtonTypeSystem];
+        [b setTitle:@"Đóng" forState:UIControlStateNormal];
+        b.frame = CGRectMake(box.bounds.size.width - 80, 6, 70, 32);
+        b.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin;
+        __weak UIView *weakBox = box;
+        [b addAction:[UIAction actionWithHandler:^(UIAction *a) { [weakBox removeFromSuperview]; }]
+            forControlEvents:UIControlEventTouchUpInside];
+        [box addSubview:b];
+
+        UITextView *tv = [[UITextView alloc] initWithFrame:CGRectMake(8, 42, box.bounds.size.width - 16, box.bounds.size.height - 50)];
+        tv.editable = NO;
+        tv.backgroundColor = [UIColor clearColor];
+        tv.textColor = [UIColor colorWithWhite:0.92 alpha:1];
+        tv.font = [UIFont monospacedSystemFontOfSize:11 weight:UIFontWeightRegular];
+        tv.text = text;
+        tv.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+        [box addSubview:tv];
+        [win addSubview:box];
     });
 }
 
@@ -157,6 +202,9 @@ void SFToast(NSString *text) {
 @property (nonatomic, strong) NSMutableSet<NSString *> *inFlight;
 @property (nonatomic, assign) NSInteger sourcesCrawled;
 @property (nonatomic, assign) BOOL toastedIndex;
+@property (nonatomic, copy) NSString *diagText;
+@property (nonatomic, assign) BOOL diagShown;
+@property (nonatomic, assign) NSInteger crawlRetries;
 @end
 
 @implementation SFEngine
@@ -187,6 +235,7 @@ void SFToast(NSString *text) {
     return @{
         @"enabled": @YES,
         @"showToast": @YES,               // hien thong bao trang thai tren man hinh
+        @"diagnostic": @NO,               // true = luon hien bang chan doan sau moi lan quet
         @"minScore": @60,
         @"maxPerVideo": @4,
         @"languages": @[],                // vd ["Vietnamese","English"]; rong = tat ca
@@ -195,7 +244,7 @@ void SFToast(NSString *text) {
         @"maxFoldersPerSource": @4000,
         @"sourceBudgetSeconds": @180,
         @"rescanMinutes": @30,
-        @"waitIndexSeconds": @4,
+        @"waitIndexSeconds": @12,
         @"downloadTimeoutSeconds": @15,
         @"includeCloudSources": @NO,
         @"excludeSources": @[],           // ten nguon (so khop mot phan, khong phan biet hoa thuong)
@@ -239,6 +288,9 @@ void SFToast(NSString *text) {
 // ---------------------------------------------------------------- quet nguon
 
 - (BOOL)isFolderItem:(id)item {
+    SEL ens = NSSelectorFromString(@"ensureThatFileTypeIsCached");
+    if ([item respondsToSelector:ens]) ((void (*)(id, SEL))objc_msgSend)(item, ens);
+    if (SFBool0(item, @"isDVDFolder") || SFBool0(item, @"isBlurayFolder") || SFBool0(item, @"isPlayableFolder")) return NO;
     return SFBool0(item, @"isRegularFolder") || SFBool0(item, @"isSeasonFolder") || SFBool0(item, @"isTVShowFolder") ||
            SFBool0(item, @"isMovieFolder") || SFBool0(item, @"isCollectionFolder") || SFBool0(item, @"isAllSeasonsFolder");
 }
@@ -271,48 +323,69 @@ void SFToast(NSString *text) {
     }
     dispatch_group_enter(self.crawlGroup);
     dispatch_async(self.crawlQueue, ^{
+        BOOL ok = NO;
         @try {
-            @autoreleasepool { [self crawlAll]; }
+            @autoreleasepool { ok = [self crawlAll]; }
         } @catch (NSException *e) {
             SFLog(@"[index] loi: %@", e);
+            self.diagText = [NSString stringWithFormat:@"Ngoai le khi quet: %@", e];
         }
+        BOOL retry = NO;
         @synchronized(self) {
             self.crawling = NO;
-            self.lastCrawl = [NSDate date];
+            if (ok) { self.lastCrawl = [NSDate date]; self.crawlRetries = 0; }
+            else if (self.crawlRetries < 6) { self.crawlRetries++; retry = YES; }
+            else self.lastCrawl = [NSDate date];
         }
         dispatch_group_leave(self.crawlGroup);
+        if (retry) {
+            SFLog(@"[index] VFS chua san sang, thu lai sau 4s (lan %ld)", (long)self.crawlRetries);
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(4 * NSEC_PER_SEC)), self.crawlQueue, ^{ [self startIndexingIfNeeded]; });
+        }
     });
 }
 
-- (void)crawlAll {
+// Tra ve NO neu VFS chua san sang (se thu lai).
+- (BOOL)crawlAll {
     Class mgrCls = NSClassFromString(@"VFSManager");
     id mgr = SFObj0(mgrCls, @"sharedManager");
     NSArray *all = SFArr0(mgr, @"allVFSs");
-    if (!mgr || !all) {
-        SFLog(@"[index] khong lay duoc VFSManager/allVFSs (Infuse doi API?)");
-        SFToast(@"ISF: không lấy được danh sách nguồn của Infuse (VFSManager)");
-        return;
+    if (!mgr || all.count == 0) {
+        SFLog(@"[index] chua co VFSManager/allVFSs (mgr=%d, so nguon=%lu)", mgr != nil, (unsigned long)all.count);
+        self.diagText = [NSString stringWithFormat:@"VFSManager=%d, allVFSs=%lu (rong/chua san sang)", mgr != nil, (unsigned long)all.count];
+        return NO;
     }
     [self loadConfig];
     NSDate *t0 = [NSDate date];
     NSMutableArray<SFSubEntry *> *result = [NSMutableArray array];
+    NSMutableString *diag = [NSMutableString string];
+    [diag appendFormat:@"Infuse %@ | %lu nguon\n", [NSBundle mainBundle].infoDictionary[@"CFBundleShortVersionString"], (unsigned long)all.count];
     NSSet *exts = [NSSet setWithArray:(NSArray *)self.config[@"extensions"]];
     NSSet *excludeFolders = [NSSet setWithArray:(NSArray *)self.config[@"excludeFolders"]];
     NSInteger maxDepth = [self intCfg:@"maxDepth"];
     NSInteger maxFolders = [self intCfg:@"maxFoldersPerSource"];
     NSTimeInterval budget = [self intCfg:@"sourceBudgetSeconds"];
+    SEL fetchSel = NSSelectorFromString(@"fetchChildrenForItem:outError:");
+
+    if ([self boolCfg:@"showToast"] && !self.toastedIndex) SFToast([NSString stringWithFormat:@"ISF: đang quét %lu nguồn...", (unsigned long)all.count]);
 
     NSInteger sourcesDone = 0;
     for (id vfs in all) {
-        if (![self shouldCrawlVFS:vfs manager:mgr]) continue;
+        NSString *srcName = SFStr0(vfs, @"name") ?: @"?";
+        NSString *cls = NSStringFromClass([vfs class]);
+        long proto = -1;
+        if ([vfs respondsToSelector:NSSelectorFromString(@"protocol")]) proto = ((long (*)(id, SEL))objc_msgSend)(vfs, NSSelectorFromString(@"protocol"));
+        if (![self shouldCrawlVFS:vfs manager:mgr]) {
+            [diag appendFormat:@"- %@ [%@ p%ld]: BO QUA\n", srcName, cls, proto];
+            continue;
+        }
         sourcesDone++;
-        NSString *srcName = SFStr0(vfs, @"name") ?: NSStringFromClass([vfs class]);
         NSString *srcId = SFStr0(vfs, @"identifier") ?: srcName;
         id root = SFObj0(vfs, @"makeRootItem");
         id browser = SFObj0(vfs, @"browser");
-        SEL fetchSel = NSSelectorFromString(@"fetchChildrenForItem:outError:");
         if (!root || !browser || ![browser respondsToSelector:fetchSel]) {
-            SFLog(@"[index] bo qua nguon '%@' (khong co root/browser)", srcName);
+            SFLog(@"[index] bo qua nguon '%@' (root=%d browser=%d)", srcName, root != nil, browser != nil);
+            [diag appendFormat:@"- %@ [%@ p%ld]: khong co root(%d)/browser(%d)\n", srcName, cls, proto, root != nil, browser != nil];
             continue;
         }
 
@@ -320,6 +393,9 @@ void SFToast(NSString *text) {
         NSMutableArray *queue = [NSMutableArray arrayWithObject:@[ root, @0 ]];
         NSUInteger head = 0;
         NSInteger folders = 0, files = 0, subs = 0, failed = 0;
+        NSMutableDictionary<NSString *, NSNumber *> *extCount = [NSMutableDictionary dictionary];
+        NSMutableArray *sampleNames = [NSMutableArray array];
+        NSString *firstErr = nil;
         while (head < queue.count) {
             if (-[srcStart timeIntervalSinceNow] > budget || folders >= maxFolders) {
                 SFLog(@"[index] '%@' dat gioi han (folders=%ld, %.0fs), dung som", srcName, (long)folders,
@@ -337,8 +413,13 @@ void SFToast(NSString *text) {
                 ok = ((BOOL (*)(id, SEL, id, NSError **))objc_msgSend)(browser, fetchSel, folder, &err);
             } @catch (NSException *e) {
                 ok = NO;
+                if (!firstErr) firstErr = [NSString stringWithFormat:@"exception %@", e.name];
             }
-            if (!ok) { failed++; continue; }
+            if (!ok) {
+                failed++;
+                if (!firstErr) firstErr = err ? err.localizedDescription : @"fetch tra ve NO";
+                continue;
+            }
 
             id lockObj = SFObj0(folder, @"childItemsLockObject");
             NSArray *children;
@@ -349,15 +430,19 @@ void SFToast(NSString *text) {
             for (id child in children) {
                 NSString *name = SFStr0(child, @"fileName");
                 if (!name.length) continue;
-                if ([self isFolderItem:child]) {
+                if (sampleNames.count < 6) [sampleNames addObject:name];
+                NSString *ext = [(SFStr0(child, @"fileExtension") ?: name.pathExtension) lowercaseString];
+                BOOL isSubExt = [exts containsObject:ext] && sf_is_subtitle_ext(ext.UTF8String);
+                if (!isSubExt && [self isFolderItem:child]) {
                     if (depth + 1 > maxDepth) continue;
                     if ([excludeFolders containsObject:SFTrimSlash(name)]) continue;
                     [queue addObject:@[ child, @(depth + 1) ]];
                     continue;
                 }
                 files++;
-                NSString *ext = [(SFStr0(child, @"fileExtension") ?: name.pathExtension) lowercaseString];
-                if (![exts containsObject:ext] || !sf_is_subtitle_ext(ext.UTF8String)) continue;
+                NSString *ek = ext.length ? ext : @"(none)";
+                extCount[ek] = @([extCount[ek] integerValue] + 1);
+                if (!isSubExt) continue;
                 SFSubEntry *e = [[SFSubEntry alloc] init];
                 e.item = child;
                 e.name = name;
@@ -370,20 +455,32 @@ void SFToast(NSString *text) {
                 subs++;
             }
         }
-        SFLog(@"[index] '%@' (%@): %ld thu muc, %ld file, %ld sub, %ld loi, %.1fs", srcName, NSStringFromClass([vfs class]),
-              (long)folders, (long)files, (long)subs, (long)failed, -[srcStart timeIntervalSinceNow]);
+        NSArray *topExt = [extCount keysSortedByValueUsingComparator:^NSComparisonResult(NSNumber *a, NSNumber *b) { return [b compare:a]; }];
+        NSMutableArray *extParts = [NSMutableArray array];
+        for (NSString *k in topExt) { if (extParts.count >= 6) break; [extParts addObject:[NSString stringWithFormat:@"%@:%@", k, extCount[k]]]; }
+        SFLog(@"[index] '%@' (%@): %ld thu muc, %ld file, %ld sub, %ld loi, %.1fs", srcName, cls, (long)folders, (long)files,
+              (long)subs, (long)failed, -[srcStart timeIntervalSinceNow]);
+        [diag appendFormat:@"- %@ [%@ p%ld]: %ld thu muc, %ld file, %ld SUB, %ld loi, %.1fs\n    duoi: %@\n    mau: %@\n",
+         srcName, cls, proto, (long)folders, (long)files, (long)subs, (long)failed, -[srcStart timeIntervalSinceNow],
+         [extParts componentsJoinedByString:@" "], [sampleNames componentsJoinedByString:@" | "]];
+        if (firstErr) [diag appendFormat:@"    loi dau tien: %@\n", firstErr];
     }
 
     @synchronized(self) { self.index = result; self.sourcesCrawled = sourcesDone; }
+    [diag appendFormat:@"=> %lu sub, %ld nguon duoc quet, %.1fs\n", (unsigned long)result.count, (long)sourcesDone, -[t0 timeIntervalSinceNow]];
+    for (NSUInteger i = 0; i < MIN((NSUInteger)5, result.count); i++) [diag appendFormat:@"   vd: %@ (thu muc: %@)\n", result[i].name, result[i].folderName];
+    self.diagText = diag;
     SFLog(@"[index] xong: %lu sub, %ld nguon, %.1fs", (unsigned long)result.count, (long)sourcesDone, -[t0 timeIntervalSinceNow]);
-    if (!self.toastedIndex && [self boolCfg:@"showToast"]) {
-        self.toastedIndex = YES;
-        SFToast([NSString stringWithFormat:@"ISF: quét xong %lu sub từ %ld nguồn (tổng %lu VFS)", (unsigned long)result.count,
-                 (long)sourcesDone, (unsigned long)all.count]);
+
+    BOOL show = [self boolCfg:@"showToast"] && (!self.diagShown) && (result.count == 0 || [self boolCfg:@"diagnostic"]);
+    if (show) {
+        self.diagShown = YES;
+        SFShowText(@"ISF chẩn đoán: quét nguồn (chụp màn hình gửi tao)", diag);
+    } else if (!self.toastedIndex && [self boolCfg:@"showToast"]) {
+        SFToast([NSString stringWithFormat:@"ISF: quét xong %lu sub từ %ld nguồn", (unsigned long)result.count, (long)sourcesDone]);
     }
-    if (result.count == 0) {
-        SFLog(@"[index] khong thay sub nao. Neu m chac chan co sub trong nguon da them thi gui log nay cho tao.");
-    }
+    self.toastedIndex = YES;
+    return YES;
 }
 
 // ---------------------------------------------------------------- khop + nhap
@@ -427,7 +524,15 @@ void SFToast(NSString *text) {
         @synchronized(self) { index = self.index; }
     }
     if (index.count == 0) {
-        return [NSString stringWithFormat:@"ISF: '%@' — chưa có index sub (đang quét hoặc quét lỗi), xem log", vName];
+    {
+        BOOL stillCrawling;
+        @synchronized(self) { stillCrawling = self.crawling; [self.lastPrepared removeObjectForKey:key]; }
+        if (!stillCrawling && self.diagText.length && !self.diagShown) {
+            self.diagShown = YES;
+            SFShowText(@"ISF chẩn đoán: index sub trống (chụp màn hình gửi tao)", self.diagText);
+        }
+        return [NSString stringWithFormat:@"ISF: '%@' — index sub trống (%@)", vName, stillCrawling ? @"đang quét, thử lại sau ít giây" : @"quét xong nhưng không thấy sub"];
+    }
     }
 
     id movieParent = SFObj0(movie, @"parent");

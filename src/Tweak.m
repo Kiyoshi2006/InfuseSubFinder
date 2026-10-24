@@ -48,7 +48,7 @@ static BOOL sf_install_hooks(void) {
 
 static void sf_app_ready(void) {
     BOOL hooked = sf_install_hooks();
-    SFToast(hooked ? @"ISF v0.2: đã nạp, hook OK — đang quét sub..." : @"ISF v0.2: đã nạp nhưng HOOK LỖI (xem log)");
+    SFToast(hooked ? @"ISF v0.3: đã nạp, hook OK — đang quét sub..." : @"ISF v0.3: đã nạp nhưng HOOK LỖI (xem log)");
     [[SFEngine shared] startIndexingIfNeeded];
 }
 
@@ -64,7 +64,7 @@ __attribute__((constructor)) static void sf_init(void) {
                                                            queue:nil
                                                       usingBlock:^(NSNotification *n) {
             // cho Infuse nap xong danh sach nguon roi moi quet
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(6 * NSEC_PER_SEC)),
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3 * NSEC_PER_SEC)),
                            dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{ sf_app_ready(); });
         }];
     }
