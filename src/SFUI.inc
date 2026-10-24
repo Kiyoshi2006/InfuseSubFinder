@@ -120,7 +120,7 @@ static NSArray *SFModes(void) { return @[ @"manual", @"launch", @"hourly", @"12h
         UISwitch *sw = [[UISwitch alloc] init];
         sw.on = [r[@"enabled"] boolValue];
         sw.tag = (NSInteger)i;
-        sw.transform = CGAffineTransformMakeScale(0.8, 0.8);
+        sw.transform = (CGAffineTransform){0.8, 0, 0, 0.8, 0, 0};
         sw.frame = CGRectMake(10, y + 8, sw.frame.size.width, sw.frame.size.height);
         [sw addTarget:self action:@selector(switchChanged:) forControlEvents:UIControlEventValueChanged];
         [self.scroll addSubview:sw];
@@ -173,7 +173,7 @@ void SFTogglePanel(void) {
     UIView *v = g.view;
     CGPoint t = [g translationInView:v.superview];
     v.center = CGPointMake(v.center.x + t.x, v.center.y + t.y);
-    [g setTranslation:CGPointZero inView:v.superview];
+    [g setTranslation:CGPointMake(0, 0) inView:v.superview];
 }
 @end
 
