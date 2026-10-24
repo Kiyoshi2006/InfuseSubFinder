@@ -652,6 +652,7 @@ void SFShowText(NSString *title, NSString *text) {
         }
     }
 
+    SFLog(@"[match] cache hien co: %@", existing);
     dispatch_group_t done = dispatch_group_create();
     __block NSInteger imported = 0;
     for (SFCandidate *c in cands) {
@@ -660,6 +661,13 @@ void SFShowText(NSString *title, NSString *text) {
         @synchronized(self) {
             if ([self.inFlight containsObject:flightKey]) continue;
             [self.inFlight addObject:flightKey];
+        }
+        if (onMain) {   // chay ngay tai cho de sub co san truoc khi Infuse gom danh sach (tai file nho, chap nhan chan ngan)
+            BOOL ok = NO;
+            @try { @autoreleasepool { ok = [self importCandidate:c itemID:itemID cache:cache]; } }
+            @catch (NSException *e) { SFLog(@"[import] loi: %@", e); }
+            @synchronized(self) { [self.inFlight removeObject:flightKey]; if (ok) imported++; }
+            continue;
         }
         dispatch_group_enter(done);
         dispatch_async(self.importQueue, ^{
@@ -677,19 +685,6 @@ void SFShowText(NSString *title, NSString *text) {
         });
     }
 
-    // Tren main thread thi khong cho (tranh treo UI); xong viec nen thi nap lai danh sach sub.
-    if (onMain) {
-        dispatch_group_notify(done, dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-            NSInteger k;
-            @synchronized(self) { k = imported; }
-            if (k <= 0) return;
-            dispatch_async(dispatch_get_main_queue(), ^{
-                SEL inv2 = NSSelectorFromString(@"invalidateExternalSubtitlesCache");
-                if ([mf respondsToSelector:inv2]) ((void (*)(id, SEL))objc_msgSend)(mf, inv2);
-            });
-            SFToast([NSString stringWithFormat:@"ISF: đã nạp %ld sub cho '%@' — mở menu sub để chọn", (long)k, vName]);
-        });
-    }
     if (!onMain) {
         NSTimeInterval to = [self intCfg:@"downloadTimeoutSeconds"];
         long r = dispatch_group_wait(done, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(to * NSEC_PER_SEC)));
@@ -761,6 +756,14 @@ void SFShowText(NSString *title, NSString *text) {
     SEL saveSel = NSSelectorFromString(@"saveSubtitlesForItemID:subtitlesPath:language:name:date:");
     if (![cache respondsToSelector:saveSel]) { SFLog(@"[import] cache khong co saveSubtitles..."); return NO; }
     ((id (*)(id, SEL, id, id, id, id, id))objc_msgSend)(cache, saveSel, itemID, local, nil, c.entry.name, [NSDate date]);
+    {   // kiem tra: Infuse co thay sub vua luu khong?
+        SEL cs = NSSelectorFromString(@"cachedSubtitlesForItemID:");
+        id arr = [cache respondsToSelector:cs] ? ((id (*)(id, SEL, id))objc_msgSend)(cache, cs, itemID) : nil;
+        NSMutableArray *names = [NSMutableArray array];
+        if ([arr isKindOfClass:[NSArray class]])
+            for (id it in (NSArray *)arr) [names addObject:[NSString stringWithFormat:@"%@|%@|%@", SFStr0(it, @"userFriendlyName"), SFStr0(it, @"language"), SFStr0(it, @"subtitlesFileName")]];
+        SFLog(@"[import] sau khi luu, cache co %lu muc cho video: %@", (unsigned long)names.count, names);
+    }
     SFLog(@"[import] + %@ [%@] diem=%d %llu byte, %.1fs (nguon '%@')", c.entry.name, c.language ?: @"?", c.score, size,
           -[t0 timeIntervalSinceNow], c.entry.sourceName);
     return YES;
