@@ -54,6 +54,9 @@ static void sf_app_ready(void) {
 __attribute__((constructor)) static void sf_init(void) {
     @autoreleasepool {
         SFLog(@"==== InfuseSubFinder khoi dong ====");
+        // hook man Cai dat ngay luc nap (nhu InfusePlus) de dong "Tim sub" co san khi man hinh dung len
+        SFInstallChapters();
+        if (!SFInstallSettingsHook()) dispatch_async(dispatch_get_main_queue(), ^{ SFInstallSettingsHook(); });
         if (!sf_install_hooks()) {
             // lop chua san sang ngay luc nap dylib -> thu lai khi app chay
             dispatch_async(dispatch_get_main_queue(), ^{ sf_install_hooks(); });
