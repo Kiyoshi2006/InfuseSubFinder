@@ -101,7 +101,11 @@ static void SFApplyChapters(id asset) {
     if (!key.length) return;
     id helper = nil;
     NSArray *chs = SFCurrentChapters(&helper);
-    if (!chs.count) return;          // tam thoi khong doc duoc chuong -> giu nguyen, khong xoa doan da ap dung (tranh nhap nhay)
+    if (!chs.count) {
+        static NSString *noChapLogged;
+        if (![noChapLogged isEqualToString:key]) { noChapLogged = [key copy]; SFLog(@"[chap] khong doc duoc chuong (key=%@, helper=%@)", key, helper ? @"co" : @"khong"); }
+        return;
+    }          // tam thoi khong doc duoc chuong -> giu nguyen, khong xoa doan da ap dung (tranh nhap nhay)
     double duration = SFD(helper, @"duration");
 
     NSMutableDictionary<NSString *, NSArray *> *found = [NSMutableDictionary dictionary];   // slot -> @[start, end, title]
@@ -166,6 +170,7 @@ static void SFApplyChapters(id asset) {
     }
     if (changed) dispatch_async(dispatch_get_main_queue(), ^{
         [[NSNotificationCenter defaultCenter] postNotificationName:@"INFPIntroSegmentsDidLoad" object:nil];
+        [[NSNotificationCenter defaultCenter] postNotificationName:@"INFPIntroSegmentsDraw" object:nil];   // thanh tien trinh ve lai
     });
 }
 
@@ -173,6 +178,14 @@ static void (*sf_orig_skip)(id, SEL, double, id);
 static void sf_hooked_skip(id self, SEL _cmd, double t, id asset) {
     @try { SFApplyChapters(asset); } @catch (NSException *e) { SFLog(@"[chap] loi: %@", e); }
     sf_orig_skip(self, _cmd, t, asset);
+}
+
+// "Skip Alert: giu den het doan": thoi luong thong bao Ask = phan con lai cua doan
+static float sf_askOverride = 0;
+static float (*sf_orig_floatForKey)(id, SEL, id);
+static float sf_hooked_floatForKey(id self, SEL _cmd, id key) {
+    if (sf_askOverride > 0 && [key isKindOfClass:[NSString class]] && [(NSString *)key isEqualToString:@"skipAlertDuration"]) return sf_askOverride;
+    return sf_orig_floatForKey(self, _cmd, key);
 }
 
 // Sua loi cua InfusePlus: menu luu Ask = 3, Auto-skip = 2 nhung ham xu ly lai hieu 3 = tu dong skip, 2 = hoi.
@@ -184,7 +197,16 @@ static void sf_hooked_handle(id self, SEL _cmd, id seg, double t) {
         if (UD && ident.length) {
             long mode = ((long (*)(id, SEL, id))objc_msgSend)(UD, NSSelectorFromString(@"intForKey:"), ident);
             if (mode == 2) { ((void (*)(id, SEL, id))objc_msgSend)(self, NSSelectorFromString(@"autoSkip:"), seg); return; }
-            if (mode == 3) { ((void (*)(id, SEL, id))objc_msgSend)(self, NSSelectorFromString(@"askBeforeSkipping:"), seg); return; }
+            if (mode == 3) {
+                if (sf_orig_floatForKey && [[NSUserDefaults standardUserDefaults] boolForKey:@"sf.skipinf"]) {
+                    double end = SFD(seg, @"end");
+                    if (end <= 0) { id h = sf_lastHelper; end = SFD(h, @"duration"); }
+                    sf_askOverride = (float)MAX(2.0, end - t);
+                }
+                ((void (*)(id, SEL, id))objc_msgSend)(self, NSSelectorFromString(@"askBeforeSkipping:"), seg);
+                sf_askOverride = 0;
+                return;
+            }
         }
     } @catch (NSException *e) { SFLog(@"[chap] loi mode: %@", e); }
     sf_orig_handle(self, _cmd, seg, t);
@@ -215,6 +237,7 @@ static void sf_hooked_ph_skip(id self, SEL _cmd, double t) {
             fa.tmdbID = fid;
             sf_fakeAsset = fa;
         }
+        if (![sf_fakeKey isEqualToString:fid]) SFLog(@"[chap] video khong co ID metadata (metadata=%@) -> dung asset gia %@", md ? @"co, thieu ID" : @"khong", fid);
         sf_fakeKey = fid;
         ((void (*)(id, SEL, double, id))objc_msgSend)(ic, NSSelectorFromString(@"skipIntroIfNeeded:withAsset:"), t, sf_fakeAsset);
     } @catch (NSException *e) { SFLog(@"[chap] loi asset gia: %@", e); }
@@ -234,6 +257,7 @@ static id sf_hooked_keyfor(id self, SEL _cmd, id asset) {
 @implementation SFChapField
 + (instancetype)shared { static SFChapField *s; static dispatch_once_t o; dispatch_once(&o, ^{ s = [SFChapField new]; }); return s; }
 - (void)changed:(UITextField *)tf { NSString *slot = objc_getAssociatedObject(tf, kSFSlotKey); if (slot) SFSetNames(slot, tf.text); }
+- (void)toggled:(UISwitch *)sw { NSString *k = objc_getAssociatedObject(sw, kSFSlotKey); if (k) [[NSUserDefaults standardUserDefaults] setBool:sw.on forKey:k]; }
 - (BOOL)textFieldShouldReturn:(UITextField *)tf { [tf resignFirstResponder]; return YES; }
 @end
 
@@ -245,7 +269,17 @@ static UITableViewCell *sf_hooked_ics_cell(id self, SEL _cmd, UITableView *tv, N
         id row = (ip.section < (NSInteger)secs.count && ip.row < (NSInteger)[secs[ip.section] count]) ? secs[ip.section][ip.row] : nil;
         NSString *slot = [row isKindOfClass:[NSDictionary class]] ? row[@"sfslot"] : nil;
         BOOL isPrio = [row isKindOfClass:[NSDictionary class]] && [row[@"sfprio"] boolValue];
-        if (isPrio) {
+        NSString *swKey = [row isKindOfClass:[NSDictionary class]] ? row[@"sfswitchkey"] : nil;
+        if (swKey) {
+            UISwitch *sw = [[UISwitch alloc] init];
+            sw.on = [[NSUserDefaults standardUserDefaults] boolForKey:swKey];
+            sw.onTintColor = tv.tintColor;
+            objc_setAssociatedObject(sw, kSFSlotKey, swKey, OBJC_ASSOCIATION_COPY_NONATOMIC);
+            [sw addTarget:[SFChapField shared] action:@selector(toggled:) forControlEvents:UIControlEventValueChanged];
+            sw.tag = 0x5F1;
+            cell.accessoryView = sw;
+            cell.selectionStyle = UITableViewCellSelectionStyleNone;
+        } else if (isPrio) {
             UIButton *b = [UIButton buttonWithType:UIButtonTypeSystem];
             void (^refresh)(UIButton *) = ^(UIButton *btn) {
                 NSString *t = SFPriority() == 1 ? @"Network " : @"Local ";
@@ -312,11 +346,23 @@ static id sf_hooked_ics_init(id self, SEL _cmd, NSInteger style) {
                         [n addObject:@{ @"type": @"sfchapters", @"title": @"Chapters", @"id": @"sfchapters", @"style": @0, @"sfslot": slot }];
                 }
             }
-            if (n.count != intros.count) {
+            NSArray *main = [me valueForKey:@"_main"];
+            NSMutableArray *nm = nil;
+            if ([main isKindOfClass:[NSArray class]]) {
+                nm = [NSMutableArray array];
+                for (id row in main) {
+                    [nm addObject:row];
+                    if ([row isKindOfClass:[NSDictionary class]] && [row[@"key"] isEqualToString:@"skipAlertDuration"])
+                        [nm addObject:@{ @"type": @"sfswitch", @"title": @"Skip Alert: hold until segment ends", @"id": @"sfswitch", @"style": @0, @"image": @"timer", @"sfswitchkey": @"sf.skipinf" }];
+                }
+                if (nm.count == main.count) nm = nil;
+            }
+            if (n.count != intros.count || nm) {
                 NSArray *oldSecs = [me valueForKey:@"_sections"];
                 NSMutableArray *newSecs = [NSMutableArray array];
-                for (id s in oldSecs) [newSecs addObject:(s == intros ? [n copy] : s)];
+                for (id s in oldSecs) [newSecs addObject:(s == intros ? [n copy] : (nm && s == main ? [nm copy] : s))];
                 [me setValue:[n copy] forKey:@"_intros"];
+                if (nm) [me setValue:[nm copy] forKey:@"_main"];
                 if (newSecs.count) [me setValue:newSecs forKey:@"_sections"];
             }
         }
@@ -334,6 +380,9 @@ static BOOL SFTryInstallChapters(void) {
         if (m && mh) {
             sf_orig_skip = (void (*)(id, SEL, double, id))method_getImplementation(m); method_setImplementation(m, (IMP)sf_hooked_skip);
             sf_orig_handle = (void (*)(id, SEL, id, double))method_getImplementation(mh); method_setImplementation(mh, (IMP)sf_hooked_handle);
+            Class UD = NSClassFromString(@"INFUserDefaults");
+            Method mf = UD ? class_getClassMethod(UD, NSSelectorFromString(@"floatForKey:")) : NULL;
+            if (mf) { sf_orig_floatForKey = (float (*)(id, SEL, id))method_getImplementation(mf); method_setImplementation(mf, (IMP)sf_hooked_floatForKey); }
             h1 = YES; SFLog(@"[chap] da hook INFPIntroController skipIntroIfNeeded:withAsset: + handleSegment:");
         }
     }

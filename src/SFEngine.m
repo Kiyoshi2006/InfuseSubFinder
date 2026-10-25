@@ -101,7 +101,12 @@ void SFToast(NSString *text) {
     dispatch_async(dispatch_get_main_queue(), ^{
         UIWindow *win = SFKeyWindow();
         if (!win) return;
+        // gan vao view cua man hinh tren cung (player xoay ngang cung doi kich thuoc) va dung auto layout -> luon can giua
+        UIViewController *vc = win.rootViewController;
+        while (vc.presentedViewController) vc = vc.presentedViewController;
+        UIView *host = vc.view ?: win;
         UILabel *l = [[UILabel alloc] init];
+        l.translatesAutoresizingMaskIntoConstraints = NO;
         l.numberOfLines = 0;
         l.font = [UIFont systemFontOfSize:13 weight:UIFontWeightMedium];
         l.textColor = [UIColor whiteColor];
@@ -111,12 +116,14 @@ void SFToast(NSString *text) {
         l.textAlignment = NSTextAlignmentCenter;
         l.text = [NSString stringWithFormat:@"  %@  ", text];
         l.userInteractionEnabled = NO;
-        CGFloat w = MIN(win.bounds.size.width - 32, 520);
-        CGSize sz = [l sizeThatFits:CGSizeMake(w, CGFLOAT_MAX)];
-        CGFloat h = sz.height + 12;
-        l.frame = CGRectMake((win.bounds.size.width - w) / 2, win.safeAreaInsets.top + 8, w, h);
         l.alpha = 0;
-        [win addSubview:l];
+        [host addSubview:l];
+        [NSLayoutConstraint activateConstraints:@[
+            [l.centerXAnchor constraintEqualToAnchor:host.centerXAnchor],
+            [l.topAnchor constraintEqualToAnchor:host.safeAreaLayoutGuide.topAnchor constant:8],
+            [l.widthAnchor constraintLessThanOrEqualToConstant:520],
+            [l.widthAnchor constraintLessThanOrEqualToAnchor:host.widthAnchor constant:-32],
+        ]];
         [UIView animateWithDuration:0.2 animations:^{ l.alpha = 1; }];
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(6 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             [UIView animateWithDuration:0.4 animations:^{ l.alpha = 0; } completion:^(BOOL f) { [l removeFromSuperview]; }];
