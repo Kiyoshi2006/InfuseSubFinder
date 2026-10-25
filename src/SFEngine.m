@@ -192,7 +192,22 @@ void SFShowText(NSString *title, NSString *text) {
 
 // ------------------------------------------------------------------ engine
 
+@interface SFJob : NSObject
+@property (nonatomic, copy) NSString *key, *subSid, *subPath, *source, *curSid;
+@property (nonatomic, strong) NSSet *only, *allIds;
+@property (nonatomic, strong) id startItem;
+@property (nonatomic, assign) BOOL isAll;
+@property (atomic, assign) BOOL cancel;
+@property (atomic, assign) double progress;
+@property (atomic, assign) NSInteger folders, subs;
+@property (nonatomic, strong) NSMutableSet *crawled;
+@property (nonatomic, strong) NSMutableArray *result;
+@end
+@implementation SFJob
+@end
+
 @interface SFEngine ()
+@property (nonatomic, strong) NSMutableDictionary<NSString *, SFJob *> *jobs;
 @property (nonatomic, strong) NSDictionary *config;
 @property (nonatomic, strong) NSArray<SFSubEntry *> *index;
 @property (nonatomic, strong) NSDate *lastCrawl;
@@ -235,6 +250,7 @@ void SFShowText(NSString *title, NSString *text) {
         _pendingRetry = [NSMutableSet set];
         _lastPrepared = [NSMutableDictionary dictionary];
         _inFlight = [NSMutableSet set];
+        _jobs = [NSMutableDictionary dictionary];
         _index = @[];
         [self loadConfig];
         [self loadSettings];
@@ -328,111 +344,140 @@ void SFShowText(NSString *title, NSString *text) {
 }
 
 - (NSString *)autoMode { return self.settings[@"auto"] ?: @"12h"; }
+- (BOOL)floatingButton { return NO; }
+
+static NSString *SFNormPath(NSString *p) {
+    NSString *r = p ?: @"";
+    while (r.length > 1 && [r hasSuffix:@"/"]) r = [r substringToIndex:r.length - 1];
+    return r;
+}
+static BOOL SFPathUnder(NSString *p, NSString *base) {
+    NSString *a = SFNormPath(p), *b = SFNormPath(base);
+    if (b.length == 0 || [b isEqualToString:@"/"]) return YES;
+    return [a isEqualToString:b] || [a hasPrefix:[b stringByAppendingString:@"/"]];
+}
+
+- (NSString *)keyForSource:(NSString *)sid path:(NSString *)path {
+    return path ? [NSString stringWithFormat:@"%@|%@", sid, SFNormPath(path)] : sid;
+}
+
+// ---- cong viec quet: moi nguon/thu muc co job rieng, chay song song
 
 - (void)startIndexingIfNeeded {
     NSString *mode = [self autoMode];
     BOOL force = NO;
     NSTimeInterval maxAge = 12 * 3600.0;
     @synchronized(self) {
-        if (!self.lastCrawl) force = YES;                              // chua tung quet
+        if (!self.lastCrawl) force = YES;
         else if ([mode isEqualToString:@"launch"]) { if (!self.launchCrawlDone) force = YES; }
         else if ([mode isEqualToString:@"hourly"]) maxAge = 3600.0;
         else if ([mode isEqualToString:@"manual"]) maxAge = 1e12;
         if (!force && self.lastCrawl && -[self.lastCrawl timeIntervalSinceNow] < maxAge) return;
         self.launchCrawlDone = YES;
     }
-    [self startCrawlOnly:nil];
+    [self startJobKey:@"*" only:nil item:nil];
 }
 
-- (BOOL)floatingButton { return [self.config[@"floatingButton"] boolValue]; }
+- (BOOL)isCrawling { @synchronized(self) { return self.jobs.count > 0; } }
 
-- (BOOL)isCrawling { @synchronized(self) { return self.crawling; } }
-
-// Quet mot so nguon (only = nil: tat ca nguon dang bat). Chay nen.
-- (void)startCrawlOnly:(NSSet *)only { [self startCrawlOnly:only startItem:nil key:nil]; }
-
-- (void)startCrawlOnly:(NSSet *)only startItem:(id)startItem key:(NSString *)key {
+- (void)startJobKey:(NSString *)key only:(NSSet *)only item:(id)item {
     if (![self boolCfg:@"enabled"]) return;
+    SFJob *job = [[SFJob alloc] init];
+    job.key = key; job.only = only; job.startItem = item;
+    if (item) { job.subSid = [key componentsSeparatedByString:@"|"].firstObject; job.subPath = SFNormPath(SFStr0(item, @"path") ?: @""); }
+    job.isAll = (only == nil);
     @synchronized(self) {
-        if (self.crawling) return;
-        self.crawling = YES;
-        self.cancelRequested = NO;
-        self.activeKey = key;
-        if (startItem) { self.subSid = [key componentsSeparatedByString:@"|"].firstObject; self.subPath = SFStr0(startItem, @"path") ?: @""; }
-        else { self.subSid = nil; self.subPath = nil; }
+        if (self.jobs[key]) return;
+        self.jobs[key] = job;
     }
-    self.progFraction = 0; self.progSource = nil;
-    dispatch_group_enter(self.crawlGroup);
-    dispatch_async(self.crawlQueue, ^{
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
         BOOL ok = NO;
-        @try {
-            @autoreleasepool { ok = [self crawlOnly:only startItem:startItem]; }
-        } @catch (NSException *e) {
-            SFLog(@"[index] loi: %@", e);
-            self.diagText = [NSString stringWithFormat:@"Ngoai le khi quet: %@", e];
+        for (int attempt = 0; attempt < 7 && !job.cancel && !ok; attempt++) {
+            @try { @autoreleasepool { ok = [self crawlJob:job]; } }
+            @catch (NSException *e) { SFLog(@"[index] loi: %@", e); }
+            if (!ok && !job.cancel) [NSThread sleepForTimeInterval:4];
         }
-        BOOL retry = NO;
         @synchronized(self) {
-            self.crawling = NO;
-            self.subSid = nil; self.subPath = nil; self.activeKey = nil;
-            if (ok) { self.lastCrawl = [NSDate date]; self.crawlRetries = 0; }
-            else if (self.crawlRetries < 6 && !self.cancelRequested) { self.crawlRetries++; retry = YES; }
-            else self.lastCrawl = [NSDate date];
+            [self.jobs removeObjectForKey:key];
+            if ([key isEqualToString:@"*"]) self.lastCrawl = [NSDate date];
+            NSMutableDictionary *last = [self.settings[@"last"] mutableCopy] ?: [NSMutableDictionary dictionary];
+            last[key] = @([[NSDate date] timeIntervalSince1970]);
+            self.settings[@"last"] = last;
         }
+        [self saveSettings];
         [self saveIndex];
-        dispatch_group_leave(self.crawlGroup);
-        if (retry) {
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(4 * NSEC_PER_SEC)), self.crawlQueue, ^{ [self startCrawlOnly:only startItem:startItem key:key]; });
-        }
     });
 }
 
-- (void)refreshAll { [self startCrawlOnly:nil startItem:nil key:nil]; }
-- (void)refreshSource:(NSString *)sid { if (sid.length) [self startCrawlOnly:[NSSet setWithObject:sid] startItem:nil key:sid]; }
+- (void)refreshAll { [self startJobKey:@"*" only:nil item:nil]; }
+- (void)refreshSource:(NSString *)sid { if (sid.length) [self startJobKey:sid only:[NSSet setWithObject:sid] item:nil]; }
 - (void)refreshFolderItem:(id)item source:(NSString *)sid {
-    NSString *path = SFStr0(item, @"path") ?: @"";
-    [self startCrawlOnly:[NSSet setWithObject:sid] startItem:item key:[NSString stringWithFormat:@"%@|%@", sid, path]];
+    [self startJobKey:[self keyForSource:sid path:SFStr0(item, @"path") ?: @""] only:[NSSet setWithObject:sid] item:item];
 }
-- (void)cancelCrawl { self.cancelRequested = YES; }
-- (NSString *)activeKeyValue { @synchronized(self) { return self.crawling ? (self.activeKey ?: @"*") : nil; } }
+- (void)cancelKey:(NSString *)key { @synchronized(self) { self.jobs[key].cancel = YES; } }
+- (void)cancelAll { @synchronized(self) { for (SFJob *j in self.jobs.allValues) j.cancel = YES; } }
+- (NSDictionary *)jobInfoForKey:(NSString *)key {
+    @synchronized(self) {
+        SFJob *j = self.jobs[key];
+        if (!j) return nil;
+        return @{ @"progress": @(j.progress), @"folders": @(j.folders), @"subs": @(j.subs), @"source": j.source ?: @"" };
+    }
+}
+- (NSInteger)runningCount { @synchronized(self) { return (NSInteger)self.jobs.count; } }
+- (double)overallProgress {
+    @synchronized(self) {
+        if (!self.jobs.count) return 1;
+        double t = 0; for (SFJob *j in self.jobs.allValues) t += j.progress;
+        return t / (double)self.jobs.count;
+    }
+}
 
-// Thu muc con (chi thu muc) cua mot item: goi tu luong nen. Moi phan tu: name, path, item, subs.
-- (NSArray<NSDictionary *> *)childFoldersOfItem:(id)item source:(NSString *)sid {
+// Liet ke thu muc con + file sub cua mot item (goi tu luong nen).
+- (NSDictionary *)listItem:(id)item source:(NSString *)sid {
     id vfs = [self vfsForSourceId:sid];
     id browser = SFObj0(vfs, @"browser");
     SEL fs = NSSelectorFromString(@"fetchChildrenForItem:outError:");
-    if (!item || ![browser respondsToSelector:fs]) return @[];
+    if (!item || ![browser respondsToSelector:fs]) return @{ @"folders": @[], @"files": @[], @"ok": @NO };
     NSError *__autoreleasing err = nil;
     BOOL ok = NO;
     @try { ok = ((BOOL (*)(id, SEL, id, NSError **))objc_msgSend)(browser, fs, item, &err); } @catch (NSException *e) { ok = NO; }
-    if (!ok) return @[];
+    if (!ok) return @{ @"folders": @[], @"files": @[], @"ok": @NO };
     id lock = SFObj0(item, @"childItemsLockObject");
     NSArray *children;
     @synchronized(lock ?: self) { children = [SFArr0(item, @"childItems") copy]; }
-    NSMutableArray *out = [NSMutableArray array];
     NSSet *exts = [NSSet setWithArray:(NSArray *)self.config[@"extensions"]];
+    NSMutableSet *indexed = [NSMutableSet set];
+    @synchronized(self) { for (SFSubEntry *e in self.index) if ([e.sourceId isEqualToString:sid]) [indexed addObject:SFNormPath(e.itemPath)]; }
+    NSMutableArray *folders = [NSMutableArray array], *files = [NSMutableArray array];
     for (id c in children) {
         NSString *name = SFStr0(c, @"fileName");
         if (!name.length) continue;
         NSString *ext = [(SFStr0(c, @"fileExtension") ?: name.pathExtension) lowercaseString];
-        if ([exts containsObject:ext] || ![self isFolderItem:c]) continue;
         NSString *p = SFStr0(c, @"path") ?: @"";
-        [out addObject:@{ @"name": SFTrimSlash(name), @"path": p, @"item": c, @"subs": @([self subCountForSource:sid pathPrefix:p]) }];
+        if ([exts containsObject:ext] && sf_is_subtitle_ext(ext.UTF8String)) {
+            [files addObject:@{ @"name": name, @"path": p, @"indexed": @([indexed containsObject:SFNormPath(p)]) }];
+        } else if ([self isFolderItem:c]) {
+            [folders addObject:@{ @"name": SFTrimSlash(name), @"path": p, @"item": c }];
+        }
     }
-    [out sortUsingComparator:^NSComparisonResult(NSDictionary *a, NSDictionary *b) { return [a[@"name"] localizedStandardCompare:b[@"name"]]; }];
-    return out;
+    NSComparator cmp = ^NSComparisonResult(NSDictionary *a, NSDictionary *b) { return [a[@"name"] localizedStandardCompare:b[@"name"]]; };
+    [folders sortUsingComparator:cmp];
+    [files sortUsingComparator:cmp];
+    return @{ @"folders": folders, @"files": files, @"ok": @YES };
 }
 - (id)rootItemForSource:(NSString *)sid { return SFObj0([self vfsForSourceId:sid], @"makeRootItem"); }
 - (NSInteger)subCountForSource:(NSString *)sid pathPrefix:(NSString *)p {
     NSArray<SFSubEntry *> *idx;
     @synchronized(self) { idx = self.index; }
     NSInteger n = 0;
-    NSString *pp = [p stringByAppendingString:@"/"];
     for (SFSubEntry *e in idx) {
         if (![e.sourceId isEqualToString:sid]) continue;
-        if (!p.length || [e.folderPath isEqualToString:p] || [e.folderPath hasPrefix:pp]) n++;
+        if (!p.length || SFPathUnder(e.folderPath, p)) n++;
     }
     return n;
+}
+- (double)lastForKey:(NSString *)key {
+    @synchronized(self) { return [((NSDictionary *)self.settings[@"last"])[key] doubleValue]; }
 }
 
 // ---- cai dat nguoi dung (settings.json)
@@ -478,74 +523,88 @@ void SFShowText(NSString *title, NSString *text) {
     }
     [self saveSettings];
 }
+// thu muc bi tat (hoac nam trong thu muc bi tat) -> khong quet, khong dung de gan sub
+- (BOOL)isPathDisabled:(NSString *)sid path:(NSString *)path {
+    NSArray *offs;
+    @synchronized(self) { offs = [(NSArray *)self.settings[@"offPaths"] copy]; }
+    for (NSString *o in offs) {
+        NSArray *parts = [o componentsSeparatedByString:@"|"];
+        if (parts.count < 2 || ![parts[0] isEqualToString:sid]) continue;
+        if (SFPathUnder(path, [[parts subarrayWithRange:NSMakeRange(1, parts.count - 1)] componentsJoinedByString:@"|"])) return YES;
+    }
+    return NO;
+}
+- (BOOL)isPathItselfDisabled:(NSString *)sid path:(NSString *)path {
+    @synchronized(self) { return [(NSArray *)self.settings[@"offPaths"] containsObject:[self keyForSource:sid path:path]]; }
+}
+- (void)setPath:(NSString *)path source:(NSString *)sid enabled:(BOOL)on {
+    NSString *k = [self keyForSource:sid path:path];
+    @synchronized(self) {
+        NSMutableArray *a = [(NSArray *)self.settings[@"offPaths"] mutableCopy] ?: [NSMutableArray array];
+        [a removeObject:k];
+        if (!on) [a addObject:k];
+        self.settings[@"offPaths"] = a;
+    }
+    [self saveSettings];
+}
 - (void)setAutoMode:(NSString *)mode {
     @synchronized(self) { self.settings[@"auto"] = mode; }
     [self saveSettings];
 }
 
-// Danh sach nguon cho giao dien: id, name, subs, enabled, last (giay).
+// Danh sach nguon cho giao dien.
 - (NSArray<NSDictionary *> *)sourceList {
     id mgr = SFObj0(NSClassFromString(@"VFSManager"), @"sharedManager");
     NSMutableArray *out = [NSMutableArray array];
-    NSArray<SFSubEntry *> *idx;
-    @synchronized(self) { idx = self.index; }
     for (id v in SFArr0(mgr, @"allVFSs")) {
         NSString *name = SFStr0(v, @"name") ?: @"?";
         if ([name isEqualToString:@"vfLocalFiles"] || ![self shouldCrawlVFS:v manager:mgr]) continue;
         NSString *sid = SFStr0(v, @"identifier") ?: name;
-        NSInteger n = 0;
-        for (SFSubEntry *e in idx) if ([e.sourceId isEqualToString:sid]) n++;
-        NSNumber *last = ((NSDictionary *)self.settings[@"last"])[sid];
-        [out addObject:@{ @"id": sid, @"name": name, @"subs": @(n), @"enabled": @(![self isSourceDisabled:sid]), @"last": last ?: @0,
+        [out addObject:@{ @"id": sid, @"name": name, @"subs": @([self subCountForSource:sid pathPrefix:nil]),
+                          @"enabled": @(![self isSourceDisabled:sid]), @"last": @([self lastForKey:sid]),
                           @"kind": NSStringFromClass([v class]), @"cloud": @([self isCloudSource:sid]),
                           @"root": SFStr0(v, @"rootPath") ?: @"" }];
     }
     return out;
 }
-
 - (NSInteger)totalSubs { @synchronized(self) { return (NSInteger)self.index.count; } }
-- (NSString *)progressSource { return self.progSource; }
-- (double)progress { return self.progFraction; }
-- (NSInteger)progressFolders { return self.progFolders; }
 
-// Cong bo ket qua tam: ket qua moi + muc cu cua nguon chua quet (va con ton tai).
-- (void)publishResult:(NSArray *)result crawled:(NSSet *)crawled including:(NSString *)cur allIds:(NSSet *)allIds {
+// Cong bo ket qua cua job vao chi muc chung: thay phan job bao phu, loai trung (cung file).
+- (BOOL)job:(SFJob *)job covers:(SFSubEntry *)old partial:(BOOL)partial {
+    if (job.subSid) return !partial && [old.sourceId isEqualToString:job.subSid] && SFPathUnder(old.folderPath, job.subPath);
+    if ([job.crawled containsObject:old.sourceId]) return YES;
+    if (!partial && [job.curSid isEqualToString:old.sourceId]) return YES;
+    if (!partial && job.isAll && job.allIds && ![job.allIds containsObject:old.sourceId]) return YES;   // nguon da bi xoa
+    return NO;
+}
+- (void)publishJob:(SFJob *)job partial:(BOOL)partial {
+    NSArray *res = [job.result copy];
     @synchronized(self) {
-        NSMutableArray *merged = [result mutableCopy];
-        for (SFSubEntry *old in self.index) {
-            if (self.subSid) {   // lam moi mot thu muc: chi thay phan thuoc thu muc do
-                BOOL inSub = [old.sourceId isEqualToString:self.subSid] &&
-                    ([old.folderPath isEqualToString:self.subPath] || [old.folderPath hasPrefix:[self.subPath stringByAppendingString:@"/"]]);
-                if (!inSub) [merged addObject:old];
-                continue;
-            }
-            if ([crawled containsObject:old.sourceId] || [cur isEqualToString:old.sourceId]) continue;
-            if (![allIds containsObject:old.sourceId]) continue;
-            [merged addObject:old];
-        }
-        self.index = merged;
+        NSMutableArray *ordered = [NSMutableArray array];
+        NSMutableDictionary<NSString *, NSNumber *> *pos = [NSMutableDictionary dictionary];
+        void (^add)(SFSubEntry *) = ^(SFSubEntry *e) {
+            NSString *k = [NSString stringWithFormat:@"%@|%@", e.sourceId, SFNormPath(e.itemPath ?: e.name)];
+            NSNumber *i = pos[k];
+            if (i) ordered[i.unsignedIntegerValue] = e;
+            else { pos[k] = @(ordered.count); [ordered addObject:e]; }
+        };
+        for (SFSubEntry *old in self.index) if (![self job:job covers:old partial:partial]) add(old);
+        for (SFSubEntry *e in res) add(e);
+        self.index = ordered;
     }
 }
 
-// Tra ve NO neu VFS chua san sang (se thu lai).
-- (BOOL)crawlAll { return [self crawlOnly:nil]; }
-
-- (BOOL)crawlOnly:(NSSet *)only { return [self crawlOnly:only startItem:nil]; }
-
-- (BOOL)crawlOnly:(NSSet *)only startItem:(id)startItem {
-    Class mgrCls = NSClassFromString(@"VFSManager");
-    id mgr = SFObj0(mgrCls, @"sharedManager");
+- (BOOL)crawlJob:(SFJob *)job {
+    id mgr = SFObj0(NSClassFromString(@"VFSManager"), @"sharedManager");
     NSArray *all = SFArr0(mgr, @"allVFSs");
-    if (!mgr || all.count == 0) {
-        SFLog(@"[index] chua co VFSManager/allVFSs (mgr=%d, so nguon=%lu)", mgr != nil, (unsigned long)all.count);
-        self.diagText = [NSString stringWithFormat:@"VFSManager=%d, allVFSs=%lu (rong/chua san sang)", mgr != nil, (unsigned long)all.count];
-        return NO;
-    }
+    if (!mgr || all.count == 0) { SFLog(@"[index] chua co VFSManager/allVFSs"); return NO; }
     [self loadConfig];
+    NSSet *only = job.only;
+    id startItem = job.startItem;
     NSDate *t0 = [NSDate date];
-    NSMutableArray<SFSubEntry *> *result = [NSMutableArray array];
-    NSMutableString *diag = [NSMutableString string];
-    [diag appendFormat:@"Infuse %@ | %lu nguon\n", [NSBundle mainBundle].infoDictionary[@"CFBundleShortVersionString"], (unsigned long)all.count];
+    job.result = [NSMutableArray array];
+    job.crawled = [NSMutableSet set];
+    NSMutableArray<SFSubEntry *> *result = job.result;
     NSSet *exts = [NSSet setWithArray:(NSArray *)self.config[@"extensions"]];
     NSSet *excludeFolders = [NSSet setWithArray:(NSArray *)self.config[@"excludeFolders"]];
     NSInteger maxDepth = [self intCfg:@"maxDepth"];
@@ -553,8 +612,7 @@ void SFShowText(NSString *title, NSString *text) {
     NSTimeInterval budget = [self intCfg:@"sourceBudgetSeconds"];
     SEL fetchSel = NSSelectorFromString(@"fetchChildrenForItem:outError:");
 
-
-    // Uu tien nguon nhanh/noi bo (iPhone, bookmark) truoc, mang (WebDAV/FTP/SMB) sau.
+    // iPhone/bookmark truoc, mang sau
     all = [all sortedArrayUsingComparator:^NSComparisonResult(id x, id y) {
         NSString *cx = NSStringFromClass([x class]), *cy = NSStringFromClass([y class]);
         int rx = [cx isEqualToString:@"VFSBookmarks"] ? 0 : ([cx isEqualToString:@"VFSLocal"] ? 1 : 2);
@@ -562,44 +620,34 @@ void SFShowText(NSString *title, NSString *text) {
         if (rx != ry) return rx < ry ? NSOrderedAscending : NSOrderedDescending;
         return NSOrderedSame;
     }];
-    NSMutableSet *crawledIds = [NSMutableSet set];
     NSMutableSet *allIds = [NSMutableSet set];
     NSInteger totalSources = 0;
     for (id v in all) {
-        NSString *i0 = SFStr0(v, @"identifier") ?: (SFStr0(v, @"name") ?: @"?");
+        NSString *nm = SFStr0(v, @"name") ?: @"?";
+        NSString *i0 = SFStr0(v, @"identifier") ?: nm;
         [allIds addObject:i0];
-        if ([[SFStr0(v, @"name") ?: @"" description] isEqualToString:@"vfLocalFiles"]) continue;
-        if ([self shouldCrawlVFS:v manager:mgr] && (only ? [only containsObject:i0] : ![self isSourceDisabled:i0])) totalSources++;
+        if ([nm isEqualToString:@"vfLocalFiles"] || ![self shouldCrawlVFS:v manager:mgr]) continue;
+        if (only ? [only containsObject:i0] : ![self isSourceDisabled:i0]) totalSources++;
     }
+    job.allIds = allIds;
     totalSources = MAX(1, totalSources);
-    self.progFraction = 0;
     NSInteger sourcesDone = 0;
     for (id vfs in all) {
-        if ([(SFStr0(vfs, @"name") ?: @"") isEqualToString:@"vfLocalFiles"]) continue;  // thu muc noi bo cua app, 16000 file khong co sub
+        if (job.cancel) break;
         NSString *srcName = SFStr0(vfs, @"name") ?: @"?";
-        NSString *cls = NSStringFromClass([vfs class]);
-        long proto = -1;
-        if ([vfs respondsToSelector:NSSelectorFromString(@"protocol")]) proto = ((long (*)(id, SEL))objc_msgSend)(vfs, NSSelectorFromString(@"protocol"));
-        if (![self shouldCrawlVFS:vfs manager:mgr]) {
-            [diag appendFormat:@"- %@ [%@ p%ld]: BO QUA\n", srcName, cls, proto];
-            continue;
-        }
+        if ([srcName isEqualToString:@"vfLocalFiles"] || ![self shouldCrawlVFS:vfs manager:mgr]) continue;
         NSString *srcId = SFStr0(vfs, @"identifier") ?: srcName;
-        if (self.cancelRequested) break;
         if (only ? ![only containsObject:srcId] : [self isSourceDisabled:srcId]) continue;
         sourcesDone++;
-        self.progSource = srcName;
-        self.progFolders = 0;
+        job.source = srcName;
+        job.curSid = srcId;
+        job.folders = 0;
         id root = startItem ?: SFObj0(vfs, @"makeRootItem");
         id browser = SFObj0(vfs, @"browser");
-        if (!root || !browser || ![browser respondsToSelector:fetchSel]) {
-            SFLog(@"[index] bo qua nguon '%@' (root=%d browser=%d)", srcName, root != nil, browser != nil);
-            [diag appendFormat:@"- %@ [%@ p%ld]: khong co root(%d)/browser(%d)\n", srcName, cls, proto, root != nil, browser != nil];
-            continue;
-        }
+        if (!root || !browser || ![browser respondsToSelector:fetchSel]) { SFLog(@"[index] bo qua nguon '%@'", srcName); continue; }
 
         NSDate *srcStart = [NSDate date];
-        if (!startItem) {   // nguon chi dinh thang mot file sub: root chinh la file do
+        if (!startItem) {   // nguon chi dinh thang mot file sub
             NSString *rn = SFStr0(root, @"fileName");
             NSString *re = [(SFStr0(root, @"fileExtension") ?: rn.pathExtension) lowercaseString];
             if (rn.length && [exts containsObject:re] && sf_is_subtitle_ext(re.UTF8String)) {
@@ -610,44 +658,30 @@ void SFShowText(NSString *title, NSString *text) {
                 e.sourceId = srcId; e.sourceName = srcName;
                 e.itemClass = NSStringFromClass([root class]); e.itemPath = SFStr0(root, @"path");
                 [result addObject:e];
-                [diag appendFormat:@"  (root la file sub: %@)\n", rn];
             }
         }
         NSMutableArray *queue = [NSMutableArray arrayWithObject:@[ root, @0 ]];
         NSUInteger head = 0;
         NSInteger folders = 0, files = 0, subs = 0, failed = 0;
-        NSMutableDictionary<NSString *, NSNumber *> *extCount = [NSMutableDictionary dictionary];
-        NSMutableArray *sampleNames = [NSMutableArray array];
-        NSString *firstErr = nil;
         while (head < queue.count) {
-            if (self.cancelRequested) { SFLog(@"[index] da huy"); break; }
+            if (job.cancel) { SFLog(@"[index] '%@' da huy", job.key); break; }
             if (-[srcStart timeIntervalSinceNow] > budget || folders >= maxFolders) {
-                SFLog(@"[index] '%@' dat gioi han (folders=%ld, %.0fs), dung som", srcName, (long)folders,
-                      -[srcStart timeIntervalSinceNow]);
+                SFLog(@"[index] '%@' dat gioi han (folders=%ld, %.0fs), dung som", srcName, (long)folders, -[srcStart timeIntervalSinceNow]);
                 break;
             }
             NSArray *entry = queue[head++];
             id folder = entry[0];
             NSInteger depth = [entry[1] integerValue];
             folders++;
-            self.progFolders = folders;
-            self.progSubs = (NSInteger)result.count;
-            self.progFraction = ((double)sourcesDone - 1 + (double)folders / (double)(folders + (NSInteger)(queue.count - head))) / (double)totalSources;
-            if (folders % 25 == 0) [self publishResult:result crawled:crawledIds including:srcId allIds:allIds];
+            job.folders = folders;
+            job.subs = (NSInteger)result.count;
+            job.progress = ((double)sourcesDone - 1 + (double)folders / (double)(folders + (NSInteger)(queue.count - head))) / (double)totalSources;
+            if (folders % 25 == 0) [self publishJob:job partial:YES];
 
             NSError *__autoreleasing err = nil;
             BOOL ok = NO;
-            @try {
-                ok = ((BOOL (*)(id, SEL, id, NSError **))objc_msgSend)(browser, fetchSel, folder, &err);
-            } @catch (NSException *e) {
-                ok = NO;
-                if (!firstErr) firstErr = [NSString stringWithFormat:@"exception %@", e.name];
-            }
-            if (!ok) {
-                failed++;
-                if (!firstErr) firstErr = err ? err.localizedDescription : @"fetch tra ve NO";
-                continue;
-            }
+            @try { ok = ((BOOL (*)(id, SEL, id, NSError **))objc_msgSend)(browser, fetchSel, folder, &err); } @catch (NSException *e) { ok = NO; }
+            if (!ok) { failed++; continue; }
 
             id lockObj = SFObj0(folder, @"childItemsLockObject");
             NSArray *children;
@@ -658,63 +692,42 @@ void SFShowText(NSString *title, NSString *text) {
             for (id child in children) {
                 NSString *name = SFStr0(child, @"fileName");
                 if (!name.length) continue;
-                if (sampleNames.count < 6) [sampleNames addObject:name];
                 NSString *ext = [(SFStr0(child, @"fileExtension") ?: name.pathExtension) lowercaseString];
                 BOOL isSubExt = [exts containsObject:ext] && sf_is_subtitle_ext(ext.UTF8String);
                 if (!isSubExt && [self isFolderItem:child]) {
                     if (depth + 1 > maxDepth) continue;
                     if ([excludeFolders containsObject:SFTrimSlash(name)]) continue;
+                    if ([self isPathDisabled:srcId path:SFStr0(child, @"path") ?: @""]) continue;
                     [queue addObject:@[ child, @(depth + 1) ]];
                     continue;
                 }
                 files++;
-                NSString *ek = ext.length ? ext : @"(none)";
-                extCount[ek] = @([extCount[ek] integerValue] + 1);
                 if (!isSubExt) continue;
                 SFSubEntry *e = [[SFSubEntry alloc] init];
-                e.item = child;
-                e.name = name;
-                e.ext = ext;
-                e.folderName = folderName;
-                e.folderPath = folderPath;
-                e.sourceId = srcId;
-                e.sourceName = srcName;
+                e.item = child; e.name = name; e.ext = ext;
+                e.folderName = folderName; e.folderPath = folderPath;
+                e.sourceId = srcId; e.sourceName = srcName;
                 e.itemClass = NSStringFromClass([child class]);
                 e.itemPath = SFStr0(child, @"path");
                 [result addObject:e];
                 subs++;
             }
         }
-        NSArray *topExt = [extCount keysSortedByValueUsingComparator:^NSComparisonResult(NSNumber *a, NSNumber *b) { return [b compare:a]; }];
-        NSMutableArray *extParts = [NSMutableArray array];
-        for (NSString *k in topExt) { if (extParts.count >= 6) break; [extParts addObject:[NSString stringWithFormat:@"%@:%@", k, extCount[k]]]; }
-        SFLog(@"[index] '%@' (%@): %ld thu muc, %ld file, %ld sub, %ld loi, %.1fs", srcName, cls, (long)folders, (long)files,
-              (long)subs, (long)failed, -[srcStart timeIntervalSinceNow]);
-        [diag appendFormat:@"- %@ [%@ p%ld]: %ld thu muc, %ld file, %ld SUB, %ld loi, %.1fs\n    duoi: %@\n    mau: %@\n",
-         srcName, cls, proto, (long)folders, (long)files, (long)subs, (long)failed, -[srcStart timeIntervalSinceNow],
-         [extParts componentsJoinedByString:@" "], [sampleNames componentsJoinedByString:@" | "]];
-        if (firstErr) [diag appendFormat:@"    loi dau tien: %@\n", firstErr];
-        [crawledIds addObject:srcId];
-        [self publishResult:result crawled:crawledIds including:nil allIds:allIds];
-        @synchronized(self) { self.settings[@"last"] = [self.settings[@"last"] mutableCopy] ?: [NSMutableDictionary dictionary]; ((NSMutableDictionary *)self.settings[@"last"])[srcId] = @([[NSDate date] timeIntervalSince1970]); }
-        [self saveSettings];
+        SFLog(@"[index] '%@' (%@): %ld thu muc, %ld file, %ld sub, %ld loi, %.1fs", srcName, NSStringFromClass([vfs class]), (long)folders, (long)files, (long)subs, (long)failed, -[srcStart timeIntervalSinceNow]);
+        if (!job.cancel) {
+            [job.crawled addObject:srcId];
+            job.curSid = nil;
+        }
+        [self publishJob:job partial:job.cancel];
+        @synchronized(self) {
+            NSMutableDictionary *last = [self.settings[@"last"] mutableCopy] ?: [NSMutableDictionary dictionary];
+            last[srcId] = @([[NSDate date] timeIntervalSince1970]);
+            self.settings[@"last"] = last;
+        }
     }
-
-    [self publishResult:result crawled:crawledIds including:nil allIds:allIds];
-    self.sourcesCrawled = sourcesDone;
-    self.progFraction = 1;
-    [self saveIndex];
-    [diag appendFormat:@"=> %lu sub, %ld nguon duoc quet, %.1fs\n", (unsigned long)result.count, (long)sourcesDone, -[t0 timeIntervalSinceNow]];
-    for (NSUInteger i = 0; i < MIN((NSUInteger)5, result.count); i++) [diag appendFormat:@"   vd: %@ (thu muc: %@)\n", result[i].name, result[i].folderName];
-    self.diagText = diag;
-    SFLog(@"[index] xong: %lu sub, %ld nguon, %.1fs", (unsigned long)result.count, (long)sourcesDone, -[t0 timeIntervalSinceNow]);
-
-    BOOL show = [self boolCfg:@"showToast"] && (!self.diagShown) && (result.count == 0 || [self boolCfg:@"diagnostic"]);
-    if (show) {
-        self.diagShown = YES;
-        SFShowText(@"ISF chẩn đoán: quét nguồn (chụp màn hình gửi tao)", diag);
-    }
-    self.toastedIndex = YES;
+    job.progress = 1;
+    [self publishJob:job partial:job.cancel];
+    SFLog(@"[index] job '%@' xong%@: %ld nguon, %.1fs", job.key, job.cancel ? @" (huy)" : @"", (long)sourcesDone, -[t0 timeIntervalSinceNow]);
     return YES;
 }
 
@@ -747,6 +760,18 @@ void SFShowText(NSString *title, NSString *text) {
         e.sourceId = r[@"sid"]; e.sourceName = r[@"sn"]; e.itemClass = r[@"cls"]; e.itemPath = r[@"p"];
         e.name = r[@"n"]; e.ext = r[@"x"]; e.folderName = r[@"fn"]; e.folderPath = r[@"fp"];
         [out addObject:e];
+    }
+    {   // loai muc trung (file cu co the bi cong don)
+        NSMutableDictionary *seen = [NSMutableDictionary dictionary];
+        NSMutableArray *uniq = [NSMutableArray array];
+        for (SFSubEntry *e in out) {
+            NSString *k = [NSString stringWithFormat:@"%@|%@", e.sourceId, SFNormPath(e.itemPath)];
+            if (seen[k]) continue;
+            seen[k] = @YES;
+            [uniq addObject:e];
+        }
+        if (uniq.count != out.count) SFLog(@"[index] loai %lu muc trung", (unsigned long)(out.count - uniq.count));
+        out = uniq;
     }
     NSDate *mt = [[[NSFileManager defaultManager] attributesOfItemAtPath:[self indexPath] error:nil] fileModificationDate];
     @synchronized(self) { self.index = out; self.lastCrawl = mt; }
@@ -805,7 +830,7 @@ static const void *kSFAttachedKey = &kSFAttachedKey;
 
     NSMutableArray<SFCandidate *> *cands = [NSMutableArray array];
     for (SFSubEntry *e in index) {
-        if ([self isSourceDisabled:e.sourceId]) continue;
+        if ([self isSourceDisabled:e.sourceId] || [self isPathDisabled:e.sourceId path:e.folderPath]) continue;
         if (skipSame && vParentPath && movieSource && [e.sourceId isEqualToString:movieSource] && [e.folderPath isEqualToString:vParentPath]) continue;
         int sc = sf_score(vName.UTF8String, vFolder.UTF8String, e.name.UTF8String, e.folderName.UTF8String);
         if (sc < minScore) continue;

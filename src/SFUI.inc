@@ -6,7 +6,7 @@
 
 static UIColor *SFCellBG(void) { return [UIColor colorWithWhite:0.11 alpha:1]; }
 
-static UITableViewCell *SFMakeCell(UITableView *tv, NSString *title, NSString *detail) {
+static UITableViewCell *SFSimpleCell(NSString *title, NSString *detail) {
     UITableViewCell *c = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:nil];
     c.backgroundColor = SFCellBG();
     c.textLabel.text = title;
@@ -25,7 +25,78 @@ static NSString *SFDate(double t) {
     return [df stringFromDate:[NSDate dateWithTimeIntervalSince1970:t]];
 }
 
-// ---- lop co so: bang toi, tu cap nhat moi 0.5s khi dang hien
+// ---- dong co: cong tac (trai) | ten + so sub + tien trinh | nut lam moi/huy (phai)
+
+@interface SFRowCell : UITableViewCell
+@property (nonatomic, strong) UISwitch *sw;
+@property (nonatomic, strong) UILabel *titleL, *detailL;
+@property (nonatomic, strong) UIProgressView *bar;
+@property (nonatomic, strong) UIButton *btn;
+@property (nonatomic, copy) NSString *sid, *path, *key;   // path = nil: nguon
+@property (nonatomic, copy) void (^onSwitch)(BOOL on);
+@property (nonatomic, copy) void (^onRefresh)(BOOL running);
+- (void)updateFromEngine;
+@end
+
+@implementation SFRowCell
+- (instancetype)init {
+    if ((self = [super initWithStyle:UITableViewCellStyleDefault reuseIdentifier:nil])) {
+        self.backgroundColor = SFCellBG();
+        self.sw = [[UISwitch alloc] init];
+        [self.sw addTarget:self action:@selector(swChanged) forControlEvents:UIControlEventValueChanged];
+        self.titleL = [[UILabel alloc] init];
+        self.titleL.textColor = UIColor.whiteColor;
+        self.titleL.numberOfLines = 0;
+        self.detailL = [[UILabel alloc] init];
+        self.detailL.textColor = [UIColor colorWithWhite:0.6 alpha:1];
+        self.detailL.font = [UIFont systemFontOfSize:13];
+        self.bar = [[UIProgressView alloc] initWithProgressViewStyle:UIProgressViewStyleDefault];
+        UIStackView *st = [[UIStackView alloc] initWithArrangedSubviews:@[ self.titleL, self.detailL, self.bar ]];
+        st.axis = UILayoutConstraintAxisVertical;
+        st.spacing = 3;
+        self.btn = [UIButton buttonWithType:UIButtonTypeSystem];
+        [self.btn addTarget:self action:@selector(btnTap) forControlEvents:UIControlEventTouchUpInside];
+        for (UIView *v in @[ self.sw, st, self.btn ]) { v.translatesAutoresizingMaskIntoConstraints = NO; [self.contentView addSubview:v]; }
+        UILayoutGuide *m = self.contentView.layoutMarginsGuide;
+        [NSLayoutConstraint activateConstraints:@[
+            [self.sw.leadingAnchor constraintEqualToAnchor:m.leadingAnchor],
+            [self.sw.centerYAnchor constraintEqualToAnchor:self.contentView.centerYAnchor],
+            [st.leadingAnchor constraintEqualToAnchor:self.sw.trailingAnchor constant:14],
+            [st.trailingAnchor constraintEqualToAnchor:self.btn.leadingAnchor constant:-6],
+            [st.topAnchor constraintEqualToAnchor:self.contentView.topAnchor constant:10],
+            [st.bottomAnchor constraintEqualToAnchor:self.contentView.bottomAnchor constant:-10],
+            [self.btn.trailingAnchor constraintEqualToAnchor:m.trailingAnchor],
+            [self.btn.centerYAnchor constraintEqualToAnchor:self.contentView.centerYAnchor],
+            [self.btn.widthAnchor constraintEqualToConstant:44],
+            [self.btn.heightAnchor constraintEqualToConstant:44],
+        ]];
+    }
+    return self;
+}
+- (void)swChanged { if (self.onSwitch) self.onSwitch(self.sw.isOn); }
+- (void)btnTap {
+    BOOL running = [[SFEngine shared] jobInfoForKey:self.key] != nil;
+    if (self.onRefresh) self.onRefresh(running);
+    [self updateFromEngine];
+}
+- (void)updateFromEngine {
+    SFEngine *e = [SFEngine shared];
+    NSDictionary *info = [e jobInfoForKey:self.key];
+    if (info) {
+        self.detailL.text = [NSString stringWithFormat:@"Đang quét… %@ thư mục · %@ sub (%.0f%%)", info[@"folders"], info[@"subs"], [info[@"progress"] doubleValue] * 100];
+        self.bar.hidden = NO;
+        self.bar.progress = (float)[info[@"progress"] doubleValue];
+    } else {
+        NSString *when = self.path ? @"" : [NSString stringWithFormat:@" · %@", SFDate([e lastForKey:self.key])];
+        self.detailL.text = [NSString stringWithFormat:@"%ld sub%@", (long)[e subCountForSource:self.sid pathPrefix:self.path], when];
+        self.bar.hidden = YES;
+    }
+    [self.btn setImage:[UIImage systemImageNamed:info ? @"xmark.circle" : @"arrow.clockwise"] forState:UIControlStateNormal];
+    self.btn.tintColor = info ? UIColor.systemRedColor : nil;
+}
+@end
+
+// ---- lop co so: bang toi, cap nhat moi 0.5s
 
 @interface SFBaseVC : UITableViewController
 @property (nonatomic, strong) NSTimer *timer;
@@ -48,25 +119,22 @@ static NSString *SFDate(double t) {
     [super viewWillAppear:a];
     __weak SFBaseVC *w = self;
     self.timer = [NSTimer scheduledTimerWithTimeInterval:0.5 repeats:YES block:^(NSTimer *t) { [w tick]; }];
+    self.sig = 0;
 }
 - (void)viewWillDisappear:(BOOL)a { [super viewWillDisappear:a]; [self.timer invalidate]; self.timer = nil; }
 - (NSUInteger)dataSignature { return 0; }
 - (void)tickExtra {}
 - (void)tick {
     SFEngine *e = [SFEngine shared];
-    if ([e isCrawling]) {
-        self.bar.progress = (float)[e progress];
-        self.statusLabel.text = [NSString stringWithFormat:@"Đang quét: %@ — %ld thư mục, tổng %ld sub (%.0f%%)", [e progressSource] ?: @"...",
-                                 (long)[e progressFolders], (long)[e totalSubs], [e progress] * 100];
-    } else {
-        self.bar.progress = 1;
-        self.statusLabel.text = [NSString stringWithFormat:@"Sẵn sàng — %ld sub trong chỉ mục.", (long)[e totalSubs]];
-    }
+    NSInteger n = [e runningCount];
+    self.bar.progress = (float)[e overallProgress];
+    self.statusLabel.text = n > 0 ? [NSString stringWithFormat:@"Đang quét %ld tác vụ — tổng %ld sub trong chỉ mục", (long)n, (long)[e totalSubs]]
+                                  : [NSString stringWithFormat:@"Sẵn sàng — %ld sub trong chỉ mục", (long)[e totalSubs]];
+    for (UITableViewCell *c in self.tableView.visibleCells) if ([c isKindOfClass:[SFRowCell class]]) [(SFRowCell *)c updateFromEngine];
     [self tickExtra];
-    NSUInteger s = [self dataSignature] ^ ([e activeKeyValue] ?: @"").hash ^ ([e isCrawling] ? 7 : 0);
+    NSUInteger s = [self dataSignature];
     if (s != self.sig) { self.sig = s; [self.tableView reloadData]; }
 }
-// o trang thai + thanh tien trinh
 - (UITableViewCell *)statusCell {
     UITableViewCell *c = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:nil];
     c.backgroundColor = SFCellBG();
@@ -95,12 +163,13 @@ static NSString *SFDate(double t) {
 }
 @end
 
-
 @interface SFFolderVC : SFBaseVC
 @property (nonatomic, copy) NSString *sid, *path, *key;
 @property (nonatomic, strong) id item;
-@property (nonatomic, strong) NSArray *folders;
+@property (nonatomic, strong) NSArray *folders, *files;
+@property (nonatomic, assign) BOOL loaded, wasRunning;
 - (instancetype)initWithSource:(NSString *)sid item:(id)item name:(NSString *)name;
+- (void)loadListing;
 @end
 
 // ---- man hinh chinh: Tim sub
@@ -113,19 +182,19 @@ static NSArray *SFModes(void) { return @[ @"manual", @"launch", @"hourly", @"12h
 
 @implementation SFSettingsVC
 - (void)viewDidLoad { [super viewDidLoad]; self.title = @"Tìm sub"; self.sources = [[SFEngine shared] sourceList]; }
-- (NSUInteger)dataSignature { self.sources = [[SFEngine shared] sourceList]; return [self.sources description].hash; }
+- (NSUInteger)dataSignature { self.sources = [[SFEngine shared] sourceList]; return [self.sources description].hash ^ (NSUInteger)[[SFEngine shared] runningCount]; }
 - (NSInteger)numberOfSectionsInTableView:(UITableView *)tv { return 3; }
 - (NSInteger)tableView:(UITableView *)tv numberOfRowsInSection:(NSInteger)s { return s == 0 ? 2 : (s == 1 ? 1 : (NSInteger)self.sources.count); }
 - (NSString *)tableView:(UITableView *)tv titleForHeaderInSection:(NSInteger)s { return s == 1 ? @"TỰ ĐỘNG LÀM MỚI" : (s == 2 ? @"NGUỒN (BẤM VÀO ĐỂ XEM THƯ MỤC)" : nil); }
 - (NSString *)tableView:(UITableView *)tv titleForFooterInSection:(NSInteger)s {
-    return s == 2 ? @"Công tắc: bật/tắt tìm sub ở nguồn đó. Nguồn đám mây (Drive...) mặc định tắt vì quét chậm." : nil;
+    return s == 2 ? @"Công tắc: bật/tắt tìm sub ở nguồn đó. Nút bên phải: làm mới riêng nguồn đó (bấm lại để hủy). Nguồn đám mây (Drive...) mặc định tắt vì quét chậm." : nil;
 }
 - (UITableViewCell *)tableView:(UITableView *)tv cellForRowAtIndexPath:(NSIndexPath *)ip {
     SFEngine *e = [SFEngine shared];
     if (ip.section == 0 && ip.row == 0) return [self statusCell];
     if (ip.section == 0) {
         BOOL active = [e isCrawling];
-        UITableViewCell *c = SFMakeCell(tv, active ? @"Hủy quét" : @"Làm mới tất cả", nil);
+        UITableViewCell *c = SFSimpleCell(active ? @"Hủy tất cả" : @"Làm mới tất cả", nil);
         c.textLabel.textColor = active ? UIColor.systemRedColor : tv.tintColor;
         return c;
     }
@@ -148,127 +217,128 @@ static NSArray *SFModes(void) { return @[ @"manual", @"launch", @"hourly", @"12h
         return c;
     }
     NSDictionary *r = self.sources[(NSUInteger)ip.row];
-    NSString *title = [r[@"cloud"] boolValue] ? [NSString stringWithFormat:@"%@  ☁︎", r[@"name"]] : r[@"name"];
-    NSString *detail = [NSString stringWithFormat:@"%@ sub · %@", r[@"subs"], SFDate([r[@"last"] doubleValue])];
-    UITableViewCell *c = SFMakeCell(tv, title, detail);
-    c.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
-    UISwitch *sw = [[UISwitch alloc] init];
-    sw.on = [r[@"enabled"] boolValue];
-    sw.tag = ip.row;
-    [sw addTarget:self action:@selector(switchChanged:) forControlEvents:UIControlEventValueChanged];
-    c.editingAccessoryView = nil;
-    UIStackView *st = [[UIStackView alloc] initWithArrangedSubviews:@[ sw ]];
-    st.frame = CGRectMake(0, 0, 60, 31);
-    c.accessoryView = st;     // cong tac thay mui ten; bam vao dong de vao thu muc
+    SFRowCell *c = [[SFRowCell alloc] init];
+    c.sid = r[@"id"]; c.path = nil; c.key = r[@"id"];
+    c.titleL.text = [r[@"cloud"] boolValue] ? [NSString stringWithFormat:@"%@  ☁︎", r[@"name"]] : r[@"name"];
+    c.sw.on = [r[@"enabled"] boolValue];
+    NSString *sid = r[@"id"];
+    c.onSwitch = ^(BOOL on) { [[SFEngine shared] setSource:sid enabled:on]; };
+    c.onRefresh = ^(BOOL running) { if (running) [[SFEngine shared] cancelKey:sid]; else [[SFEngine shared] refreshSource:sid]; };
+    [c updateFromEngine];
     return c;
 }
 - (void)modeChanged:(UISegmentedControl *)seg { [[SFEngine shared] setAutoMode:SFModes()[(NSUInteger)seg.selectedSegmentIndex]]; }
-- (void)switchChanged:(UISwitch *)sw {
-    NSDictionary *r = self.sources[(NSUInteger)sw.tag];
-    [[SFEngine shared] setSource:r[@"id"] enabled:sw.isOn];
-    self.sig = 0;
-}
 - (void)tableView:(UITableView *)tv didSelectRowAtIndexPath:(NSIndexPath *)ip {
     [tv deselectRowAtIndexPath:ip animated:YES];
     SFEngine *e = [SFEngine shared];
-    if (ip.section == 0 && ip.row == 1) { if ([e isCrawling]) [e cancelCrawl]; else [e refreshAll]; self.sig = 0; return; }
+    if (ip.section == 0 && ip.row == 1) { if ([e isCrawling]) [e cancelAll]; else [e refreshAll]; self.sig = 0; return; }
     if (ip.section == 2) {
         NSDictionary *r = self.sources[(NSUInteger)ip.row];
-        SFFolderVC *vc = [[SFFolderVC alloc] initWithSource:r[@"id"] item:nil name:r[@"name"]];
-        [self.navigationController pushViewController:vc animated:YES];
+        [self.navigationController pushViewController:[[SFFolderVC alloc] initWithSource:r[@"id"] item:nil name:r[@"name"]] animated:YES];
     }
 }
 @end
 
-// ---- man hinh thu muc cua mot nguon (hoac thu muc con)
+// ---- man hinh thu muc: thu muc con (cong tac + lam moi) va file sub (da them / chua them)
 
 @implementation SFFolderVC
 - (instancetype)initWithSource:(NSString *)sid item:(id)item name:(NSString *)name {
     if ((self = [super init])) {
         _sid = sid; _item = item; self.title = name;
-        id pathObj = item ? ([item respondsToSelector:NSSelectorFromString(@"path")] ? ((id (*)(id, SEL))objc_msgSend)(item, NSSelectorFromString(@"path")) : nil) : nil;
-        _path = [pathObj isKindOfClass:[NSString class]] ? pathObj : @"";
-        _key = item ? [NSString stringWithFormat:@"%@|%@", sid, _path] : sid;
-        _folders = nil;
+        id p = item && [item respondsToSelector:NSSelectorFromString(@"path")] ? ((id (*)(id, SEL))objc_msgSend)(item, NSSelectorFromString(@"path")) : nil;
+        _path = item ? ([p isKindOfClass:[NSString class]] ? p : @"") : nil;
+        _key = [[SFEngine shared] keyForSource:sid path:_path];
     }
     return self;
 }
 - (void)viewDidLoad {
     [super viewDidLoad];
+    self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc] initWithImage:[UIImage systemImageNamed:@"arrow.clockwise"] style:UIBarButtonItemStylePlain target:self action:@selector(topRefresh)];
+    [self loadListing];
+}
+- (void)loadListing {
     __weak SFFolderVC *w = self;
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        SFFolderVC *s0 = w; if (!s0) return;
         SFEngine *e = [SFEngine shared];
-        id it = w.item ?: [e rootItemForSource:w.sid];
-        NSArray *f = [e childFoldersOfItem:it source:w.sid];
-        dispatch_async(dispatch_get_main_queue(), ^{ SFFolderVC *s = w; if (!s) return; s.item = it; s.folders = f; s.sig = 0; [s tick]; });
+        id it = s0.item ?: [e rootItemForSource:s0.sid];
+        NSDictionary *d = [e listItem:it source:s0.sid];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            SFFolderVC *s = w; if (!s) return;
+            s.item = it; s.folders = d[@"folders"]; s.files = d[@"files"]; s.loaded = YES; s.sig = 0;
+        });
     });
 }
+- (void)topRefresh {
+    SFEngine *e = [SFEngine shared];
+    if ([e jobInfoForKey:self.key]) [e cancelKey:self.key];
+    else if (self.path) [e refreshFolderItem:self.item source:self.sid];
+    else [e refreshSource:self.sid];
+}
+- (void)tickExtra {
+    SFEngine *e = [SFEngine shared];
+    BOOL running = [e jobInfoForKey:self.key] != nil;
+    [self.navigationItem.rightBarButtonItem setImage:[UIImage systemImageNamed:running ? @"xmark.circle" : @"arrow.clockwise"]];
+    self.navigationItem.rightBarButtonItem.tintColor = running ? UIColor.systemRedColor : nil;
+    if (self.wasRunning && !running) [self loadListing];   // quet xong: doc lai de cap nhat "da them / chua them"
+    self.wasRunning = running;
+}
 - (NSUInteger)dataSignature {
-    NSInteger n = [[SFEngine shared] subCountForSource:self.sid pathPrefix:self.path];
-    NSUInteger h = (NSUInteger)n * 31 + self.folders.count;
-    for (NSDictionary *d in self.folders) h = h * 31 + (NSUInteger)[[SFEngine shared] subCountForSource:self.sid pathPrefix:d[@"path"]];
+    NSUInteger h = self.folders.count * 7 + self.files.count * 13 + (self.loaded ? 1 : 0);
+    for (NSDictionary *f in self.files) h = h * 31 + [f[@"indexed"] unsignedIntegerValue];
     return h;
 }
-- (NSInteger)numberOfSectionsInTableView:(UITableView *)tv { return 2; }
+- (NSInteger)numberOfSectionsInTableView:(UITableView *)tv { return 3; }
 - (NSInteger)tableView:(UITableView *)tv numberOfRowsInSection:(NSInteger)s {
-    if (s == 0) return 2;
-    return self.folders ? (NSInteger)MAX((NSUInteger)1, self.folders.count) : 1;
+    if (s == 0) return 1;
+    NSArray *a = s == 1 ? self.folders : self.files;
+    return self.loaded ? (NSInteger)MAX((NSUInteger)1, a.count) : 1;
 }
-- (NSString *)tableView:(UITableView *)tv titleForHeaderInSection:(NSInteger)s { return s == 1 ? @"THƯ MỤC CON" : nil; }
-- (BOOL)thisActive { NSString *k = [[SFEngine shared] activeKeyValue]; return k && ([k isEqualToString:self.key] || [k isEqualToString:@"*"]); }
+- (NSString *)tableView:(UITableView *)tv titleForHeaderInSection:(NSInteger)s {
+    if (s == 1) return @"THƯ MỤC CON";
+    if (s == 2) {
+        NSInteger done = 0; for (NSDictionary *f in self.files) if ([f[@"indexed"] boolValue]) done++;
+        NSInteger fresh = (NSInteger)self.files.count - done;
+        return self.loaded ? [NSString stringWithFormat:@"SUB TRONG THƯ MỤC NÀY — %ld ĐÃ THÊM, %ld CHƯA THÊM", (long)done, (long)fresh] : @"SUB TRONG THƯ MỤC NÀY";
+    }
+    return nil;
+}
+- (NSString *)tableView:(UITableView *)tv titleForFooterInSection:(NSInteger)s {
+    return s == 2 ? @"Dấu tích xanh: đã có trong chỉ mục. Chưa thêm: có trên ổ nhưng chưa quét — bấm nút làm mới ở trên cùng để thêm." : nil;
+}
 - (UITableViewCell *)tableView:(UITableView *)tv cellForRowAtIndexPath:(NSIndexPath *)ip {
     SFEngine *e = [SFEngine shared];
-    if (ip.section == 0 && ip.row == 0) return [self statusCell];
-    if (ip.section == 0) {
-        BOOL busy = [e isCrawling], mine = [self thisActive];
-        NSString *t = mine ? @"Hủy quét" : (busy ? @"Đang quét việc khác..." : (self.item ? @"Làm mới thư mục này" : @"Làm mới nguồn này"));
-        NSString *d = [NSString stringWithFormat:@"%ld sub trong mục này", (long)[e subCountForSource:self.sid pathPrefix:self.path]];
-        UITableViewCell *c = SFMakeCell(tv, t, d);
-        c.textLabel.textColor = mine ? UIColor.systemRedColor : (busy ? [UIColor grayColor] : tv.tintColor);
+    if (ip.section == 0) return [self statusCell];
+    if (!self.loaded) return SFSimpleCell(@"Đang tải danh sách...", nil);
+    if (ip.section == 1) {
+        if (self.folders.count == 0) return SFSimpleCell(@"(không có thư mục con)", nil);
+        NSDictionary *f = self.folders[(NSUInteger)ip.row];
+        NSString *sid = self.sid, *p = f[@"path"];
+        SFRowCell *c = [[SFRowCell alloc] init];
+        c.sid = sid; c.path = p; c.key = [e keyForSource:sid path:p];
+        c.titleL.text = f[@"name"];
+        c.sw.on = ![e isPathItselfDisabled:sid path:p];
+        c.onSwitch = ^(BOOL on) { [[SFEngine shared] setPath:p source:sid enabled:on]; };
+        id item = f[@"item"];
+        NSString *key = c.key;
+        c.onRefresh = ^(BOOL running) { if (running) [[SFEngine shared] cancelKey:key]; else [[SFEngine shared] refreshFolderItem:item source:sid]; };
+        [c updateFromEngine];
         return c;
     }
-    if (!self.folders) return SFMakeCell(tv, @"Đang tải danh sách thư mục...", nil);
-    if (self.folders.count == 0) return SFMakeCell(tv, @"(không có thư mục con)", nil);
-    NSDictionary *f = self.folders[(NSUInteger)ip.row];
-    NSString *k = [NSString stringWithFormat:@"%@|%@", self.sid, f[@"path"]];
-    NSString *ak = [e activeKeyValue];
-    BOOL running = ak && [ak isEqualToString:k];
-    UITableViewCell *c = SFMakeCell(tv, f[@"name"], [NSString stringWithFormat:@"%ld sub", (long)[e subCountForSource:self.sid pathPrefix:f[@"path"]]]);
-    c.accessoryType = UITableViewCellAccessoryNone;
-    UIButton *b = [UIButton buttonWithType:UIButtonTypeSystem];
-    [b setImage:[UIImage systemImageNamed:running ? @"xmark.circle" : @"arrow.clockwise"] forState:UIControlStateNormal];
-    b.tintColor = running ? UIColor.systemRedColor : nil;
-    b.frame = CGRectMake(0, 0, 44, 44);
-    b.tag = ip.row;
-    [b addTarget:self action:@selector(rowRefresh:) forControlEvents:UIControlEventTouchUpInside];
-    c.accessoryView = b;
+    if (self.files.count == 0) return SFSimpleCell(@"(không có file sub)", nil);
+    NSDictionary *f = self.files[(NSUInteger)ip.row];
+    BOOL indexed = [f[@"indexed"] boolValue];
+    UITableViewCell *c = SFSimpleCell(f[@"name"], indexed ? @"Đã thêm" : @"Chưa thêm");
+    c.selectionStyle = UITableViewCellSelectionStyleNone;
+    c.imageView.image = [UIImage systemImageNamed:indexed ? @"checkmark.circle.fill" : @"circle"];
+    c.imageView.tintColor = indexed ? UIColor.systemGreenColor : [UIColor grayColor];
     return c;
-}
-- (void)rowRefresh:(UIButton *)b {
-    NSDictionary *f = self.folders[(NSUInteger)b.tag];
-    SFEngine *e = [SFEngine shared];
-    NSString *k = [NSString stringWithFormat:@"%@|%@", self.sid, f[@"path"]];
-    NSString *ak = [e activeKeyValue];
-    if (ak && [ak isEqualToString:k]) { [e cancelCrawl]; }
-    else if ([e isCrawling]) { SFToast(@"ISF: đang quét việc khác, hủy trước đã"); }
-    else { [e refreshFolderItem:f[@"item"] source:self.sid]; }
-    self.sig = 0;
 }
 - (void)tableView:(UITableView *)tv didSelectRowAtIndexPath:(NSIndexPath *)ip {
     [tv deselectRowAtIndexPath:ip animated:YES];
-    SFEngine *e = [SFEngine shared];
-    if (ip.section == 0 && ip.row == 1) {
-        if ([self thisActive]) [e cancelCrawl];
-        else if ([e isCrawling]) SFToast(@"ISF: đang quét việc khác, hủy trước đã");
-        else if (self.item) [e refreshFolderItem:self.item source:self.sid];
-        else [e refreshSource:self.sid];
-        self.sig = 0;
-        return;
-    }
-    if (ip.section == 1 && self.folders.count > (NSUInteger)ip.row) {
+    if (ip.section == 1 && self.loaded && self.folders.count > (NSUInteger)ip.row) {
         NSDictionary *f = self.folders[(NSUInteger)ip.row];
-        SFFolderVC *vc = [[SFFolderVC alloc] initWithSource:self.sid item:f[@"item"] name:f[@"name"]];
-        [self.navigationController pushViewController:vc animated:YES];
+        [self.navigationController pushViewController:[[SFFolderVC alloc] initWithSource:self.sid item:f[@"item"] name:f[@"name"]] animated:YES];
     }
 }
 @end

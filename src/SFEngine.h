@@ -25,22 +25,25 @@ void SFOpenSettings(id settingsController);   // nut ISF noi + bang cai dat (SFU
 - (NSArray *)relatedItemsForMediaFile:(id)mediaFile original:(NSArray *)orig;
 
 - (BOOL)isCrawling;
-- (void)refreshFolderItem:(id)item source:(NSString *)sourceId;
-- (void)cancelCrawl;
-- (NSString *)activeKeyValue;   // nil = khong quet; "*" = tat ca; "sid"; "sid|path"
-- (NSArray<NSDictionary *> *)childFoldersOfItem:(id)item source:(NSString *)sourceId;
-- (id)rootItemForSource:(NSString *)sourceId;
-- (NSInteger)subCountForSource:(NSString *)sourceId pathPrefix:(NSString *)path;
-- (BOOL)floatingButton;
 - (void)refreshAll;
 - (void)refreshSource:(NSString *)sourceId;
-- (NSArray<NSDictionary *> *)sourceList;   // id, name, subs, enabled, last
+- (void)refreshFolderItem:(id)item source:(NSString *)sourceId;
+- (void)cancelKey:(NSString *)key;
+- (void)cancelAll;
+- (NSDictionary *)jobInfoForKey:(NSString *)key;   // progress, folders, subs, source (nil = khong chay)
+- (NSInteger)runningCount;
+- (double)overallProgress;
+- (NSString *)keyForSource:(NSString *)sourceId path:(NSString *)path;   // path = nil -> key cua nguon
+- (NSDictionary *)listItem:(id)item source:(NSString *)sourceId;         // folders, files, ok
+- (id)rootItemForSource:(NSString *)sourceId;
+- (NSInteger)subCountForSource:(NSString *)sourceId pathPrefix:(NSString *)path;
+- (double)lastForKey:(NSString *)key;
+- (NSArray<NSDictionary *> *)sourceList;
 - (void)setSource:(NSString *)sourceId enabled:(BOOL)on;
+- (BOOL)isPathItselfDisabled:(NSString *)sourceId path:(NSString *)path;
+- (void)setPath:(NSString *)path source:(NSString *)sourceId enabled:(BOOL)on;
 - (NSString *)autoMode;                      // manual | launch | hourly | 12h
 - (void)setAutoMode:(NSString *)mode;
 - (NSInteger)totalSubs;
-- (NSString *)progressSource;
-- (double)progress;                          // 0..1
-- (NSInteger)progressFolders;
 
 @end
