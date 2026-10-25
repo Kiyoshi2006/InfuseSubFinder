@@ -45,5 +45,12 @@ void SFOpenSettings(id settingsController);   // nut ISF noi + bang cai dat (SFU
 - (NSString *)autoMode;                      // manual | launch | hourly | 12h
 - (void)setAutoMode:(NSString *)mode;
 - (NSInteger)totalSubs;
+- (BOOL)isLocalSource:(NSString *)sourceId;
+- (NSDictionary *)reconcileListing:(NSDictionary *)listing folder:(id)folderItem source:(NSString *)sourceId apply:(BOOL)apply;
+- (NSArray<NSDictionary *> *)indexedFoldersUnder:(NSString *)basePath source:(NSString *)sourceId;
+- (NSArray<NSDictionary *> *)indexedFilesIn:(NSString *)folderPath source:(NSString *)sourceId;
+- (id)folderItemForSource:(NSString *)sourceId path:(NSString *)path;
+- (NSString *)rootPathForSource:(NSString *)sourceId;
+- (void)startLocalWatcher;
 
 @end

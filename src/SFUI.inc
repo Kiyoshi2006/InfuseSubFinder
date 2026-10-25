@@ -166,10 +166,12 @@ static NSString *SFDate(double t) {
 @interface SFFolderVC : SFBaseVC
 @property (nonatomic, copy) NSString *sid, *path, *key;
 @property (nonatomic, strong) id item;
-@property (nonatomic, strong) NSArray *folders, *files;
-@property (nonatomic, assign) BOOL loaded, wasRunning;
+@property (nonatomic, strong) NSArray *folders, *files, *addedNames, *removedNames;
+@property (nonatomic, strong) NSDictionary *lastListing;
+@property (nonatomic, assign) BOOL loaded, wasRunning, listing, local;
+@property (nonatomic, assign) NSInteger pollTick;
 - (instancetype)initWithSource:(NSString *)sid item:(id)item name:(NSString *)name;
-- (void)loadListing;
+- (void)pollListing;
 @end
 
 // ---- man hinh chinh: Tim sub
@@ -247,32 +249,58 @@ static NSArray *SFModes(void) { return @[ @"manual", @"launch", @"hourly", @"12h
         _sid = sid; _item = item; self.title = name;
         id p = item && [item respondsToSelector:NSSelectorFromString(@"path")] ? ((id (*)(id, SEL))objc_msgSend)(item, NSSelectorFromString(@"path")) : nil;
         _path = item ? ([p isKindOfClass:[NSString class]] ? p : @"") : nil;
-        _key = [[SFEngine shared] keyForSource:sid path:_path];
+        SFEngine *e = [SFEngine shared];
+        _key = [e keyForSource:sid path:_path];
+        _local = [e isLocalSource:sid];
+        // hien ngay tu chi muc, khong cho server
+        NSString *base = _path ?: [e rootPathForSource:sid];
+        _folders = [e indexedFoldersUnder:base source:sid];
+        _files = [e indexedFilesIn:base source:sid];
+        _loaded = YES;
+        _addedNames = @[]; _removedNames = @[];
     }
     return self;
 }
 - (void)viewDidLoad {
     [super viewDidLoad];
     self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc] initWithImage:[UIImage systemImageNamed:@"arrow.clockwise"] style:UIBarButtonItemStylePlain target:self action:@selector(topRefresh)];
-    [self loadListing];
+    [self pollListing];
 }
-- (void)loadListing {
+// doc lai thu muc tu o (nen), so voi chi muc
+- (void)pollListing {
+    if (self.listing) return;
+    self.listing = YES;
     __weak SFFolderVC *w = self;
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         SFFolderVC *s0 = w; if (!s0) return;
         SFEngine *e = [SFEngine shared];
         id it = s0.item ?: [e rootItemForSource:s0.sid];
         NSDictionary *d = [e listItem:it source:s0.sid];
+        NSDictionary *diff = [e reconcileListing:d folder:it source:s0.sid apply:s0.local];
         dispatch_async(dispatch_get_main_queue(), ^{
             SFFolderVC *s = w; if (!s) return;
-            s.item = it; s.folders = d[@"folders"]; s.files = d[@"files"]; s.loaded = YES; s.sig = 0;
+            s.listing = NO;
+            if (![d[@"ok"] boolValue]) return;     // loi mang: giu du lieu cu
+            s.item = s.item ?: it;
+            s.lastListing = d;
+            NSMutableArray *files = [NSMutableArray array];
+            for (NSDictionary *f in d[@"files"]) {
+                NSMutableDictionary *m = [f mutableCopy];
+                if (s.local) m[@"indexed"] = @YES;
+                [files addObject:m];
+            }
+            s.folders = d[@"folders"]; s.files = files;
+            s.addedNames = s.local ? @[] : diff[@"addedNames"];
+            s.removedNames = s.local ? @[] : diff[@"removedNames"];
+            s.loaded = YES;
         });
     });
 }
 - (void)topRefresh {
     SFEngine *e = [SFEngine shared];
+    id it = self.item ?: (self.path ? [e folderItemForSource:self.sid path:self.path] : nil);
     if ([e jobInfoForKey:self.key]) [e cancelKey:self.key];
-    else if (self.path) [e refreshFolderItem:self.item source:self.sid];
+    else if (self.path && it) [e refreshFolderItem:it source:self.sid];
     else [e refreshSource:self.sid];
 }
 - (void)tickExtra {
@@ -280,36 +308,49 @@ static NSArray *SFModes(void) { return @[ @"manual", @"launch", @"hourly", @"12h
     BOOL running = [e jobInfoForKey:self.key] != nil;
     [self.navigationItem.rightBarButtonItem setImage:[UIImage systemImageNamed:running ? @"xmark.circle" : @"arrow.clockwise"]];
     self.navigationItem.rightBarButtonItem.tintColor = running ? UIColor.systemRedColor : nil;
-    if (self.wasRunning && !running) [self loadListing];   // quet xong: doc lai de cap nhat "da them / chua them"
+    BOOL force = self.wasRunning && !running;
     self.wasRunning = running;
+    self.pollTick++;
+    if (force || self.pollTick % (self.local ? 6 : 20) == 0) [self pollListing];
 }
 - (NSUInteger)dataSignature {
-    NSUInteger h = self.folders.count * 7 + self.files.count * 13 + (self.loaded ? 1 : 0);
-    for (NSDictionary *f in self.files) h = h * 31 + [f[@"indexed"] unsignedIntegerValue];
+    NSUInteger h = self.folders.count * 7 + self.files.count * 13 + self.addedNames.count * 17 + self.removedNames.count * 19;
+    for (NSDictionary *f in self.files) h = h * 31 + [f[@"indexed"] unsignedIntegerValue] + [f[@"name"] hash];
+    for (NSDictionary *f in self.folders) h = h * 31 + [f[@"name"] hash];
     return h;
 }
+- (NSInteger)actionRows { return (self.addedNames.count ? 1 : 0) + (self.removedNames.count ? 1 : 0); }
 - (NSInteger)numberOfSectionsInTableView:(UITableView *)tv { return 3; }
 - (NSInteger)tableView:(UITableView *)tv numberOfRowsInSection:(NSInteger)s {
-    if (s == 0) return 1;
-    NSArray *a = s == 1 ? self.folders : self.files;
-    return self.loaded ? (NSInteger)MAX((NSUInteger)1, a.count) : 1;
+    if (s == 0) return 1 + [self actionRows];
+    if (s == 1) return (NSInteger)MAX((NSUInteger)1, self.folders.count);
+    return (NSInteger)MAX((NSUInteger)1, self.files.count + self.removedNames.count);
 }
 - (NSString *)tableView:(UITableView *)tv titleForHeaderInSection:(NSInteger)s {
     if (s == 1) return @"THƯ MỤC CON";
     if (s == 2) {
         NSInteger done = 0; for (NSDictionary *f in self.files) if ([f[@"indexed"] boolValue]) done++;
         NSInteger fresh = (NSInteger)self.files.count - done;
-        return self.loaded ? [NSString stringWithFormat:@"SUB TRONG THƯ MỤC NÀY — %ld ĐÃ THÊM, %ld CHƯA THÊM", (long)done, (long)fresh] : @"SUB TRONG THƯ MỤC NÀY";
+        return [NSString stringWithFormat:@"SUB TRONG THƯ MỤC NÀY — %ld ĐÃ THÊM, %ld CHƯA THÊM%@", (long)done, (long)fresh,
+                self.removedNames.count ? [NSString stringWithFormat:@", %lu ĐÃ MẤT", (unsigned long)self.removedNames.count] : @""];
     }
     return nil;
 }
 - (NSString *)tableView:(UITableView *)tv titleForFooterInSection:(NSInteger)s {
-    return s == 2 ? @"Dấu tích xanh: đã có trong chỉ mục. Chưa thêm: có trên ổ nhưng chưa quét — bấm nút làm mới ở trên cùng để thêm." : nil;
+    if (s != 2) return nil;
+    return self.local ? @"Nguồn trên iPhone: sub thêm vào hoặc xóa khỏi thư mục này tự cập nhật vào chỉ mục."
+                      : @"Dấu tích xanh: đã có trong chỉ mục. Trang tự kiểm tra thư mục mỗi vài giây; bấm \"Thêm\" để nạp sub mới.";
 }
 - (UITableViewCell *)tableView:(UITableView *)tv cellForRowAtIndexPath:(NSIndexPath *)ip {
     SFEngine *e = [SFEngine shared];
-    if (ip.section == 0) return [self statusCell];
-    if (!self.loaded) return SFSimpleCell(@"Đang tải danh sách...", nil);
+    if (ip.section == 0) {
+        if (ip.row == 0) return [self statusCell];
+        BOOL isAdd = (ip.row == 1 && self.addedNames.count);
+        UITableViewCell *c = isAdd ? SFSimpleCell([NSString stringWithFormat:@"Thêm %lu sub mới", (unsigned long)self.addedNames.count], [self.addedNames componentsJoinedByString:@", "])
+                                   : SFSimpleCell([NSString stringWithFormat:@"Xóa %lu sub đã mất khỏi chỉ mục", (unsigned long)self.removedNames.count], [self.removedNames componentsJoinedByString:@", "]);
+        c.textLabel.textColor = isAdd ? tv.tintColor : UIColor.systemRedColor;
+        return c;
+    }
     if (ip.section == 1) {
         if (self.folders.count == 0) return SFSimpleCell(@"(không có thư mục con)", nil);
         NSDictionary *f = self.folders[(NSUInteger)ip.row];
@@ -319,13 +360,26 @@ static NSArray *SFModes(void) { return @[ @"manual", @"launch", @"hourly", @"12h
         c.titleL.text = f[@"name"];
         c.sw.on = ![e isPathItselfDisabled:sid path:p];
         c.onSwitch = ^(BOOL on) { [[SFEngine shared] setPath:p source:sid enabled:on]; };
-        id item = f[@"item"];
+        id knownItem = f[@"item"];
         NSString *key = c.key;
-        c.onRefresh = ^(BOOL running) { if (running) [[SFEngine shared] cancelKey:key]; else [[SFEngine shared] refreshFolderItem:item source:sid]; };
+        c.onRefresh = ^(BOOL running) {
+            SFEngine *en = [SFEngine shared];
+            if (running) { [en cancelKey:key]; return; }
+            id it = knownItem ?: [en folderItemForSource:sid path:p];
+            if (it) [en refreshFolderItem:it source:sid];
+        };
         [c updateFromEngine];
         return c;
     }
-    if (self.files.count == 0) return SFSimpleCell(@"(không có file sub)", nil);
+    NSUInteger n = self.files.count;
+    if (n == 0 && self.removedNames.count == 0) return SFSimpleCell(@"(không có file sub)", nil);
+    if ((NSUInteger)ip.row >= n) {
+        UITableViewCell *c = SFSimpleCell(self.removedNames[(NSUInteger)ip.row - n], @"Đã mất khỏi thư mục");
+        c.selectionStyle = UITableViewCellSelectionStyleNone;
+        c.imageView.image = [UIImage systemImageNamed:@"xmark.circle.fill"];
+        c.imageView.tintColor = UIColor.systemRedColor;
+        return c;
+    }
     NSDictionary *f = self.files[(NSUInteger)ip.row];
     BOOL indexed = [f[@"indexed"] boolValue];
     UITableViewCell *c = SFSimpleCell(f[@"name"], indexed ? @"Đã thêm" : @"Chưa thêm");
@@ -336,9 +390,21 @@ static NSArray *SFModes(void) { return @[ @"manual", @"launch", @"hourly", @"12h
 }
 - (void)tableView:(UITableView *)tv didSelectRowAtIndexPath:(NSIndexPath *)ip {
     [tv deselectRowAtIndexPath:ip animated:YES];
-    if (ip.section == 1 && self.loaded && self.folders.count > (NSUInteger)ip.row) {
+    SFEngine *e = [SFEngine shared];
+    if (ip.section == 0 && ip.row >= 1) {
+        // them / xoa theo danh sach vua doc
+        [e reconcileListing:self.lastListing folder:self.item source:self.sid apply:YES];
+        self.addedNames = @[]; self.removedNames = @[];
+        NSMutableArray *files = [NSMutableArray array];
+        for (NSDictionary *f in self.lastListing[@"files"]) { NSMutableDictionary *m = [f mutableCopy]; m[@"indexed"] = @YES; [files addObject:m]; }
+        self.files = files;
+        return;
+    }
+    if (ip.section == 1 && self.folders.count > (NSUInteger)ip.row) {
         NSDictionary *f = self.folders[(NSUInteger)ip.row];
-        [self.navigationController pushViewController:[[SFFolderVC alloc] initWithSource:self.sid item:f[@"item"] name:f[@"name"]] animated:YES];
+        id it = f[@"item"] ?: [e folderItemForSource:self.sid path:f[@"path"]];
+        if (!it) return;
+        [self.navigationController pushViewController:[[SFFolderVC alloc] initWithSource:self.sid item:it name:f[@"name"]] animated:YES];
     }
 }
 @end
@@ -394,6 +460,12 @@ static void sf_hooked_vwa(id self, SEL _cmd, BOOL animated) {
     @try { SFAddSettingsRow(self); } @catch (NSException *e) { SFLog(@"[ui] loi them dong cai dat: %@", e); }
 }
 
+static void (*sf_orig_vdl)(id, SEL);
+static void sf_hooked_vdl(id self, SEL _cmd) {
+    sf_orig_vdl(self, _cmd);
+    @try { SFAddSettingsRow(self); } @catch (NSException *e) { SFLog(@"[ui] loi them dong cai dat: %@", e); }
+}
+
 BOOL SFInstallSettingsHook(void) {
     static BOOL done = NO;
     if (done) return YES;
@@ -402,6 +474,8 @@ BOOL SFInstallSettingsHook(void) {
     if (!m) return NO;
     sf_orig_vwa = (void (*)(id, SEL, BOOL))method_getImplementation(m);
     method_setImplementation(m, (IMP)sf_hooked_vwa);
+    Method m2 = class_getInstanceMethod(cls, @selector(viewDidLoad));
+    if (m2) { sf_orig_vdl = (void (*)(id, SEL))method_getImplementation(m2); method_setImplementation(m2, (IMP)sf_hooked_vdl); }
     done = YES;
     SFLog(@"[ui] da hook FCMainUserSettingsController viewWillAppear:");
     return YES;

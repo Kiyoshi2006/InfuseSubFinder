@@ -455,7 +455,7 @@ static BOOL SFPathUnder(NSString *p, NSString *base) {
         NSString *ext = [(SFStr0(c, @"fileExtension") ?: name.pathExtension) lowercaseString];
         NSString *p = SFStr0(c, @"path") ?: @"";
         if ([exts containsObject:ext] && sf_is_subtitle_ext(ext.UTF8String)) {
-            [files addObject:@{ @"name": name, @"path": p, @"indexed": @([indexed containsObject:SFNormPath(p)]) }];
+            [files addObject:@{ @"name": name, @"path": p, @"ext": ext, @"item": c, @"indexed": @([indexed containsObject:SFNormPath(p)]) }];
         } else if ([self isFolderItem:c]) {
             [folders addObject:@{ @"name": SFTrimSlash(name), @"path": p, @"item": c }];
         }
@@ -465,6 +465,172 @@ static BOOL SFPathUnder(NSString *p, NSString *base) {
     [files sortUsingComparator:cmp];
     return @{ @"folders": folders, @"files": files, @"ok": @YES };
 }
+
+// ---- dong bo mot thu muc voi chi muc (them file moi / bo file da mat)
+
+- (BOOL)isLocalSource:(NSString *)sid {
+    NSString *c = NSStringFromClass([[self vfsForSourceId:sid] class]);
+    return [c isEqualToString:@"VFSBookmarks"] || [c isEqualToString:@"VFSLocal"];
+}
+
+// listing: ket qua listItem:. Tra ve @{added, removed, addedNames, removedNames}. apply=YES: cap nhat chi muc.
+- (NSDictionary *)reconcileListing:(NSDictionary *)listing folder:(id)folderItem source:(NSString *)sid apply:(BOOL)apply {
+    if (![listing[@"ok"] boolValue] || !folderItem) return @{ @"added": @0, @"removed": @0, @"addedNames": @[], @"removedNames": @[] };
+    NSString *fpath = SFNormPath(SFStr0(folderItem, @"path") ?: @"");
+    NSMutableDictionary<NSString *, NSDictionary *> *live = [NSMutableDictionary dictionary];
+    for (NSDictionary *f in listing[@"files"]) live[SFNormPath(f[@"path"])] = f;
+    NSMutableArray *addedNames = [NSMutableArray array], *removedNames = [NSMutableArray array];
+    NSMutableArray<SFSubEntry *> *toAdd = [NSMutableArray array], *toRemove = [NSMutableArray array];
+    NSString *srcName = SFStr0([self vfsForSourceId:sid], @"name") ?: sid;
+    @synchronized(self) {
+        NSMutableSet *have = [NSMutableSet set];
+        for (SFSubEntry *e in self.index) {
+            if (![e.sourceId isEqualToString:sid] || ![SFNormPath(e.folderPath) isEqualToString:fpath]) continue;
+            NSString *k = SFNormPath(e.itemPath);
+            [have addObject:k];
+            if (!live[k]) { [toRemove addObject:e]; [removedNames addObject:e.name ?: @""]; }
+        }
+        for (NSString *k in live) {
+            if ([have containsObject:k]) continue;
+            NSDictionary *f = live[k];
+            SFSubEntry *e = [[SFSubEntry alloc] init];
+            e.item = f[@"item"]; e.name = f[@"name"]; e.ext = f[@"ext"];
+            e.folderName = SFTrimSlash(SFStr0(folderItem, @"fileName") ?: @"");
+            e.folderPath = SFStr0(folderItem, @"path") ?: @"";
+            e.sourceId = sid; e.sourceName = srcName;
+            e.itemClass = NSStringFromClass([f[@"item"] class]); e.itemPath = f[@"path"];
+            [toAdd addObject:e]; [addedNames addObject:e.name ?: @""];
+        }
+        if (apply && (toAdd.count || toRemove.count)) {
+            NSMutableArray *n = [self.index mutableCopy];
+            [n removeObjectsInArray:toRemove];
+            [n addObjectsFromArray:toAdd];
+            self.index = n;
+        }
+    }
+    if (apply && (toAdd.count || toRemove.count)) [self saveIndex];
+    return @{ @"added": @(toAdd.count), @"removed": @(toRemove.count), @"addedNames": addedNames, @"removedNames": removedNames };
+}
+
+// Thu muc con suy ra tu chi muc (de mo trang ngay, chua can doi server).
+- (NSArray<NSDictionary *> *)indexedFoldersUnder:(NSString *)base source:(NSString *)sid {
+    NSString *b = SFNormPath(base ?: @"");
+    NSString *prefix = (b.length == 0 || [b isEqualToString:@"/"]) ? @"/" : [b stringByAppendingString:@"/"];
+    NSMutableDictionary<NSString *, NSString *> *names = [NSMutableDictionary dictionary];   // path -> name
+    NSArray<SFSubEntry *> *idx;
+    @synchronized(self) { idx = self.index; }
+    for (SFSubEntry *e in idx) {
+        if (![e.sourceId isEqualToString:sid]) continue;
+        NSString *fp = SFNormPath(e.folderPath);
+        if (![fp hasPrefix:prefix] || fp.length <= prefix.length) continue;
+        NSString *rest = [fp substringFromIndex:prefix.length];
+        NSString *comp = [rest componentsSeparatedByString:@"/"].firstObject;
+        if (!comp.length) continue;
+        names[[prefix stringByAppendingString:comp]] = comp;
+    }
+    NSMutableArray *out = [NSMutableArray array];
+    for (NSString *p in names) [out addObject:@{ @"name": names[p], @"path": p }];
+    [out sortUsingComparator:^NSComparisonResult(NSDictionary *a, NSDictionary *b2) { return [a[@"name"] localizedStandardCompare:b2[@"name"]]; }];
+    return out;
+}
+- (NSArray<NSDictionary *> *)indexedFilesIn:(NSString *)folderPath source:(NSString *)sid {
+    NSString *fp = SFNormPath(folderPath ?: @"");
+    NSMutableArray *out = [NSMutableArray array];
+    NSArray<SFSubEntry *> *idx;
+    @synchronized(self) { idx = self.index; }
+    for (SFSubEntry *e in idx) {
+        if ([e.sourceId isEqualToString:sid] && [SFNormPath(e.folderPath) isEqualToString:fp])
+            [out addObject:@{ @"name": e.name ?: @"", @"path": e.itemPath ?: @"", @"indexed": @YES }];
+    }
+    [out sortUsingComparator:^NSComparisonResult(NSDictionary *a, NSDictionary *b2) { return [a[@"name"] localizedStandardCompare:b2[@"name"]]; }];
+    return out;
+}
+// Dung lai VFSItem cua thu muc tu duong dan (cung lop voi goc nguon).
+- (id)folderItemForSource:(NSString *)sid path:(NSString *)path {
+    id root = [self rootItemForSource:sid];
+    id vfs = [self vfsForSourceId:sid];
+    Class cls = [root class];
+    SEL initSel = NSSelectorFromString(@"initWithVFS:path:");
+    if (!vfs || !cls || ![cls instancesRespondToSelector:initSel]) return nil;
+    return ((id (*)(id, SEL, id, id))objc_msgSend)([cls alloc], initSel, vfs, path);
+}
+- (NSString *)rootPathForSource:(NSString *)sid { return SFStr0([self rootItemForSource:sid], @"path") ?: @""; }
+
+// ---- dong bo nhanh nguon local bang file he thong (neu duong dan la duong dan that doc duoc)
+
+- (void)startLocalWatcher {
+    static BOOL started = NO;
+    if (started) return;
+    started = YES;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [NSTimer scheduledTimerWithTimeInterval:15 repeats:YES block:^(NSTimer *t) {
+            if ([UIApplication sharedApplication].applicationState != UIApplicationStateActive) return;
+            dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{ @try { [self localFastSync]; } @catch (NSException *e) {} });
+        }];
+    });
+}
+
+- (void)localFastSync {
+    id mgr = SFObj0(NSClassFromString(@"VFSManager"), @"sharedManager");
+    NSSet *exts = [NSSet setWithArray:(NSArray *)self.config[@"extensions"]];
+    NSFileManager *fm = [NSFileManager defaultManager];
+    static NSMutableSet *logged;
+    if (!logged) logged = [NSMutableSet set];
+    for (id vfs in SFArr0(mgr, @"allVFSs")) {
+        NSString *cls = NSStringFromClass([vfs class]);
+        if (![cls isEqualToString:@"VFSBookmarks"] || ![self shouldCrawlVFS:vfs manager:mgr]) continue;
+        NSString *sid = SFStr0(vfs, @"identifier") ?: SFStr0(vfs, @"name");
+        if (!sid || [self isSourceDisabled:sid]) continue;
+        @synchronized(self) { if (self.jobs[sid] || self.jobs[@"*"]) continue; }
+        NSString *rp = SFStr0(SFObj0(vfs, @"makeRootItem"), @"path");
+        BOOL isDir = NO;
+        BOOL usable = rp.length && [rp hasPrefix:@"/"] && [fm fileExistsAtPath:rp isDirectory:&isDir] && isDir;
+        if (![logged containsObject:sid]) { [logged addObject:sid]; SFLog(@"[local] nguon '%@' duong dan goc='%@' doc truc tiep=%d", SFStr0(vfs, @"name"), rp, usable); }
+        if (!usable) continue;
+        // liet ke file sub that
+        NSMutableDictionary<NSString *, NSString *> *disk = [NSMutableDictionary dictionary];   // path -> folder path
+        NSDirectoryEnumerator *en = [fm enumeratorAtPath:rp];
+        NSUInteger n = 0;
+        for (NSString *rel in en) {
+            if (++n > 40000) break;
+            if ([rel.lastPathComponent hasPrefix:@"."]) { [en skipDescendants]; continue; }
+            NSString *ext = rel.pathExtension.lowercaseString;
+            if (![exts containsObject:ext]) continue;
+            NSString *full = [rp stringByAppendingPathComponent:rel];
+            disk[SFNormPath(full)] = [full stringByDeletingLastPathComponent];
+        }
+        NSString *srcName = SFStr0(vfs, @"name") ?: sid;
+        NSMutableArray *toAdd = [NSMutableArray array], *toRemove = [NSMutableArray array];
+        @synchronized(self) {
+            NSMutableSet *have = [NSMutableSet set];
+            for (SFSubEntry *e in self.index) {
+                if (![e.sourceId isEqualToString:sid] || !SFPathUnder(e.itemPath, rp)) continue;
+                NSString *k = SFNormPath(e.itemPath);
+                [have addObject:k];
+                if (!disk[k]) [toRemove addObject:e];
+            }
+            Class icls = NSClassFromString(@"_TtC6infuse16VFSBookmarksItem") ?: [SFObj0(vfs, @"makeRootItem") class];
+            SEL initSel = NSSelectorFromString(@"initWithVFS:path:");
+            for (NSString *k in disk) {
+                if ([have containsObject:k] || ![icls instancesRespondToSelector:initSel]) continue;
+                SFSubEntry *e = [[SFSubEntry alloc] init];
+                e.name = k.lastPathComponent; e.ext = k.pathExtension.lowercaseString;
+                e.folderPath = disk[k]; e.folderName = disk[k].lastPathComponent;
+                e.sourceId = sid; e.sourceName = srcName;
+                e.itemClass = NSStringFromClass(icls); e.itemPath = k;
+                [toAdd addObject:e];
+            }
+            if (toAdd.count || toRemove.count) {
+                NSMutableArray *nidx = [self.index mutableCopy];
+                [nidx removeObjectsInArray:toRemove];
+                [nidx addObjectsFromArray:toAdd];
+                self.index = nidx;
+            }
+        }
+        if (toAdd.count || toRemove.count) { SFLog(@"[local] '%@': +%lu -%lu", srcName, (unsigned long)toAdd.count, (unsigned long)toRemove.count); [self saveIndex]; }
+    }
+}
+
 - (id)rootItemForSource:(NSString *)sid { return SFObj0([self vfsForSourceId:sid], @"makeRootItem"); }
 - (NSInteger)subCountForSource:(NSString *)sid pathPrefix:(NSString *)p {
     NSArray<SFSubEntry *> *idx;
@@ -845,6 +1011,16 @@ static const void *kSFAttachedKey = &kSFAttachedKey;
         if (a.score != b.score) return a.score > b.score ? NSOrderedAscending : NSOrderedDescending;
         return [a.entry.name compare:b.entry.name];
     }];
+    {   // nguon local: bo qua (va xoa khoi chi muc) sub da bi xoa
+        NSMutableArray *gone = [NSMutableArray array];
+        for (SFCandidate *c in [cands copy]) {
+            NSString *p = c.entry.itemPath;
+            if ([p hasPrefix:@"/"] && [self isLocalSource:c.entry.sourceId] && ![[NSFileManager defaultManager] fileExistsAtPath:p]) {
+                [cands removeObject:c]; [gone addObject:c.entry];
+            }
+        }
+        if (gone.count) { @synchronized(self) { NSMutableArray *n = [self.index mutableCopy]; [n removeObjectsInArray:gone]; self.index = n; } [self saveIndex]; }
+    }
     NSInteger maxPer = MAX(1, [self intCfg:@"maxPerVideo"]);
     NSMutableArray *added = [NSMutableArray array];
     NSMutableSet *seen = [NSMutableSet set];

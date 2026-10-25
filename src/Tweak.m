@@ -44,6 +44,7 @@ static void sf_app_ready(void) {
     SFInstallSettingsHook();
     SFInstallUI();
     [[SFEngine shared] startIndexingIfNeeded];
+    [[SFEngine shared] startLocalWatcher];
     // che do "moi gio": kiem tra dinh ky
     dispatch_async(dispatch_get_main_queue(), ^{
         [NSTimer scheduledTimerWithTimeInterval:600 repeats:YES block:^(NSTimer *tm) { [[SFEngine shared] startIndexingIfNeeded]; }];
