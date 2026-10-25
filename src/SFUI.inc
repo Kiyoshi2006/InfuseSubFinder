@@ -440,8 +440,7 @@ BOOL SFInstallSettingsHook(void) {
     if (!m) return NO;
     sf_orig_vwa = (void (*)(id, SEL, BOOL))method_getImplementation(m);
     method_setImplementation(m, (IMP)sf_hooked_vwa);
-    Method m2 = class_getInstanceMethod(cls, @selector(viewDidLoad));
-    if (m2) { sf_orig_vdl = (void (*)(id, SEL))method_getImplementation(m2); method_setImplementation(m2, (IMP)sf_hooked_vdl); }
+    // chi chen o viewWillAppear: luc do dong "Infuse Plus" (chen o viewDidLoad) da co san -> dong cua minh nam ngay duoi no
     done = YES;
     SFLog(@"[ui] da hook FCMainUserSettingsController viewWillAppear:");
     return YES;

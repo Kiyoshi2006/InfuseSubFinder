@@ -265,7 +265,7 @@ void SFShowText(NSString *title, NSString *text) {
     return @{
         @"enabled": @YES,
         @"floatingButton": @NO,           // true = nut ISF noi tren man hinh (mac dinh dung dong trong Cai dat)
-        @"showToast": @NO,                // hien thong bao trang thai tren man hinh
+        @"showToast": @YES,               // hien thong bao trang thai tren man hinh
         @"diagnostic": @NO,               // true = luon hien bang chan doan sau moi lan quet
         @"minScore": @60,
         @"maxPerVideo": @4,
@@ -1031,6 +1031,7 @@ static const void *kSFAttachedKey = &kSFAttachedKey;
     }
     SFLog(@"[related] '%@': %lu ung vien, gan %lu sub", vName, (unsigned long)cands.count, (unsigned long)added.count);
     if (added.count == 0) return orig;
+    if ([self boolCfg:@"showToast"]) SFToast([NSString stringWithFormat:@"ISF: gắn %lu sub cho '%@'", (unsigned long)added.count, vName]);
     NSMutableArray *out = [NSMutableArray arrayWithArray:orig ?: @[]];
     [out addObjectsFromArray:added];
     return out;

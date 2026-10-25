@@ -54,9 +54,11 @@ static double SFD(id obj, NSString *sel) {
     return ((double (*)(id, SEL))objc_msgSend)(obj, s);
 }
 
+static __weak id sf_lastHelper;
 static NSArray *SFCurrentChapters(id *helperOut) {
     Class PH = NSClassFromString(@"PlayerHelper");
     id helper = PH && [PH respondsToSelector:NSSelectorFromString(@"currentPlayer")] ? ((id (*)(id, SEL))objc_msgSend)(PH, NSSelectorFromString(@"currentPlayer")) : nil;
+    if (!helper) helper = sf_lastHelper;
     if (helperOut) *helperOut = helper;
     if (!helper) return nil;
     NSArray *list = nil;
@@ -99,6 +101,7 @@ static void SFApplyChapters(id asset) {
     if (!key.length) return;
     id helper = nil;
     NSArray *chs = SFCurrentChapters(&helper);
+    if (!chs.count) return;          // tam thoi khong doc duoc chuong -> giu nguyen, khong xoa doan da ap dung (tranh nhap nhay)
     double duration = SFD(helper, @"duration");
 
     NSMutableDictionary<NSString *, NSArray *> *found = [NSMutableDictionary dictionary];   // slot -> @[start, end, title]
@@ -189,12 +192,19 @@ static void sf_hooked_handle(id self, SEL _cmd, id seg, double t) {
 
 // Video chua khop metadata: PlayerHelper bo qua het -> tu goi controller voi asset gia.
 static void (*sf_orig_ph_skip)(id, SEL, double);
+static id (*sf_orig_keyfor)(id, SEL, id);
 static void sf_hooked_ph_skip(id self, SEL _cmd, double t) {
+    sf_lastHelper = self;
     sf_orig_ph_skip(self, _cmd, t);
     @try {
         id mi = SFObj0(self, @"mediaItem");
         if (!mi) { sf_fakeKey = nil; return; }
-        if (SFObj0(mi, @"metadata")) { sf_fakeKey = nil; return; }       // co metadata -> InfusePlus tu xu ly
+        id md = SFObj0(mi, @"metadata");
+        Class MgrC = NSClassFromString(@"INFPIntroManager");
+        id mgr = MgrC ? ((id (*)(id, SEL))objc_msgSend)(MgrC, NSSelectorFromString(@"sharedManager")) : nil;
+        NSString *realKey = (md && mgr && sf_orig_keyfor) ? sf_orig_keyfor(mgr, NSSelectorFromString(@"keyForAsset:"), md) : nil;
+        if (realKey.length) { sf_fakeKey = nil; return; }           // co ID metadata -> InfusePlus tu goi, hook skip lo phan chuong
+        // khong co metadata, hoac metadata khong co tmdb/imdb/tvdb ID -> InfusePlus bo qua; ta tu goi voi asset gia
         Class UD = NSClassFromString(@"INFUserDefaults");
         if (!UD || !((BOOL (*)(id, SEL, id))objc_msgSend)(UD, NSSelectorFromString(@"boolForKey:"), @"skipIntros")) return;
         id ic = SFObj0(self, @"introController");
@@ -211,10 +221,10 @@ static void sf_hooked_ph_skip(id self, SEL _cmd, double t) {
 }
 
 // Ve thanh tien trinh cung hoi metadata (nil) -> tra khoa gia
-static id (*sf_orig_keyfor)(id, SEL, id);
 static id sf_hooked_keyfor(id self, SEL _cmd, id asset) {
-    if (!asset && sf_fakeKey) return sf_fakeKey;
-    return sf_orig_keyfor(self, _cmd, asset);
+    id r = sf_orig_keyfor(self, _cmd, asset);
+    if (![(NSString *)r length] && sf_fakeKey) return sf_fakeKey;
+    return r;
 }
 
 // ---- dong nhap ten chuong trong trang Intros cua InfusePlus
