@@ -559,6 +559,9 @@ static BOOL SFPathUnder(NSString *p, NSString *base) {
 // ---- dong bo nhanh nguon local bang file he thong (neu duong dan la duong dan that doc duoc)
 
 - (void)startLocalWatcher {
+    // Da tat: duong dan cua nguon iPhone trong Infuse la duong dan ao ('/'), khong phai file he thong,
+    // nen doc truc tiep se xoa nham chi muc. Dong bo local dung danh sach cua Infuse (trang thu muc).
+    return;
     static BOOL started = NO;
     if (started) return;
     started = YES;
@@ -1011,16 +1014,6 @@ static const void *kSFAttachedKey = &kSFAttachedKey;
         if (a.score != b.score) return a.score > b.score ? NSOrderedAscending : NSOrderedDescending;
         return [a.entry.name compare:b.entry.name];
     }];
-    {   // nguon local: bo qua (va xoa khoi chi muc) sub da bi xoa
-        NSMutableArray *gone = [NSMutableArray array];
-        for (SFCandidate *c in [cands copy]) {
-            NSString *p = c.entry.itemPath;
-            if ([p hasPrefix:@"/"] && [self isLocalSource:c.entry.sourceId] && ![[NSFileManager defaultManager] fileExistsAtPath:p]) {
-                [cands removeObject:c]; [gone addObject:c.entry];
-            }
-        }
-        if (gone.count) { @synchronized(self) { NSMutableArray *n = [self.index mutableCopy]; [n removeObjectsInArray:gone]; self.index = n; } [self saveIndex]; }
-    }
     NSInteger maxPer = MAX(1, [self intCfg:@"maxPerVideo"]);
     NSMutableArray *added = [NSMutableArray array];
     NSMutableSet *seen = [NSMutableSet set];
