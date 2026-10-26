@@ -111,32 +111,106 @@ static NSString *SFMB(unsigned long long b) {
 }
 @end
 
+// ---- bang theo doi lien tuc (keo di chuyen, phong to/thu nho), bat bang nut ben trai (i) trong player
+static BOOL SFMonShown(void) { return [[NSUserDefaults standardUserDefaults] boolForKey:@"sf.monshow"]; }
+static void SFMonToggle(void) {
+    NSUserDefaults *u = [NSUserDefaults standardUserDefaults];
+    [u setBool:![u boolForKey:@"sf.monshow"] forKey:@"sf.monshow"];
+}
+static CGFloat SFMonScale(void) { double v = [[NSUserDefaults standardUserDefaults] doubleForKey:@"sf.monscale"]; return v > 0 ? (CGFloat)v : 1.0; }
+
+@interface SFMonView : UIVisualEffectView
+@property (nonatomic, strong) UILabel *title, *body;
+@property (nonatomic, assign) CGPoint startCenter;
+@end
+@implementation SFMonView
+- (instancetype)init {
+    if ((self = [super initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemChromeMaterialDark]])) {
+        self.layer.cornerRadius = 12; self.clipsToBounds = YES;
+        _title = [UILabel new]; _title.text = @"Theo dõi phát"; _title.font = [UIFont systemFontOfSize:13 weight:UIFontWeightSemibold]; _title.textColor = UIColor.whiteColor;
+        _body = [UILabel new]; _body.numberOfLines = 0;
+        _body.font = [UIFont monospacedDigitSystemFontOfSize:12 weight:UIFontWeightRegular]; _body.textColor = [UIColor colorWithWhite:1 alpha:0.9];
+        UIButton *(^mk)(NSString *, SEL) = ^UIButton *(NSString *t, SEL sel) {
+            UIButton *b = [UIButton buttonWithType:UIButtonTypeSystem];
+            [b setTitle:t forState:UIControlStateNormal]; b.titleLabel.font = [UIFont systemFontOfSize:18 weight:UIFontWeightBold];
+            b.tintColor = UIColor.whiteColor; [b addTarget:self action:sel forControlEvents:UIControlEventTouchUpInside];
+            [b.widthAnchor constraintEqualToConstant:30].active = YES; return b; };
+        UIStackView *hdr = [[UIStackView alloc] initWithArrangedSubviews:@[ _title, [UIView new], mk(@"−", @selector(smaller)), mk(@"+", @selector(bigger)), mk(@"✕", @selector(closeMe)) ]];
+        hdr.axis = UILayoutConstraintAxisHorizontal; hdr.alignment = UIStackViewAlignmentCenter;
+        UIStackView *st = [[UIStackView alloc] initWithArrangedSubviews:@[ hdr, _body ]];
+        st.axis = UILayoutConstraintAxisVertical; st.spacing = 4; st.translatesAutoresizingMaskIntoConstraints = NO;
+        [self.contentView addSubview:st];
+        [NSLayoutConstraint activateConstraints:@[
+            [st.topAnchor constraintEqualToAnchor:self.contentView.topAnchor constant:6],
+            [st.bottomAnchor constraintEqualToAnchor:self.contentView.bottomAnchor constant:-10],
+            [st.leadingAnchor constraintEqualToAnchor:self.contentView.leadingAnchor constant:12],
+            [st.trailingAnchor constraintEqualToAnchor:self.contentView.trailingAnchor constant:-6],
+            [st.widthAnchor constraintEqualToConstant:230] ]];
+        [self addGestureRecognizer:[[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(pan:)]];
+        [self addGestureRecognizer:[[UIPinchGestureRecognizer alloc] initWithTarget:self action:@selector(pinch:)]];
+    }
+    return self;
+}
+- (void)applyScale:(CGFloat)k {
+    k = MAX(0.6, MIN(2.2, k));
+    [[NSUserDefaults standardUserDefaults] setDouble:k forKey:@"sf.monscale"];
+    self.transform = CGAffineTransformMakeScale(k, k);
+}
+- (void)smaller { [self applyScale:SFMonScale() - 0.15]; }
+- (void)bigger { [self applyScale:SFMonScale() + 0.15]; }
+- (void)closeMe { [[NSUserDefaults standardUserDefaults] setBool:NO forKey:@"sf.monshow"]; [self removeFromSuperview]; }
+- (void)pan:(UIPanGestureRecognizer *)g {
+    UIView *host = self.superview; if (!host) return;
+    CGPoint t = [g translationInView:host];
+    if (g.state == UIGestureRecognizerStateBegan) _startCenter = self.center;
+    CGPoint c = CGPointMake(_startCenter.x + t.x, _startCenter.y + t.y);
+    c.x = MAX(20, MIN(host.bounds.size.width - 20, c.x)); c.y = MAX(20, MIN(host.bounds.size.height - 20, c.y));
+    self.center = c;
+    if (g.state == UIGestureRecognizerStateEnded) {
+        NSUserDefaults *u = [NSUserDefaults standardUserDefaults];
+        [u setDouble:c.x / host.bounds.size.width forKey:@"sf.monx"]; [u setDouble:c.y / host.bounds.size.height forKey:@"sf.mony"];
+    }
+}
+- (void)pinch:(UIPinchGestureRecognizer *)g {
+    static CGFloat base;
+    if (g.state == UIGestureRecognizerStateBegan) base = SFMonScale();
+    [self applyScale:base * g.scale];
+}
+@end
+
+static NSString *SFTimeStr(double t) {
+    if (!(t >= 0)) t = 0; long s = (long)t;
+    return s >= 3600 ? [NSString stringWithFormat:@"%ld:%02ld:%02ld", s / 3600, (s / 60) % 60, s % 60] : [NSString stringWithFormat:@"%02ld:%02ld", s / 60, s % 60];
+}
+static BOOL SFAnimating(CALayer *l, int d) {
+    if (l.animationKeys.count) return YES;
+    if (d > 3) return NO;
+    for (CALayer *s in l.sublayers) if (SFAnimating(s, d + 1)) return YES;
+    return NO;
+}
+
 static void SFLoadHUDTick(void) {
     static __weak id curVC; static NSDate *vcStart, *visStart; static BOOL wasVisible;
     static unsigned long long lastBytes[SF_LS_MAX]; static NSDate *lastT; static double speed; static int best = -1;
-    static __weak UIView *spinner; static SFLoadHUDView *hud; static int tickN; static NSDate *lastCacheLog; static int cacheLogs;
+    static __weak UIView *spinner; static SFLoadHUDView *hud; static SFMonView *mon; static int tickN; static NSDate *lastCacheLog; static int cacheLogs;
+    static double lastCT = -1; static NSDate *lastAdvance; static int stalls; static BOOL wasStall; static int lastSig = -1;
     tickN++;
     UIViewController *vc = SFProbeTopVC();
     if (![NSStringFromClass([vc class]) isEqualToString:@"FCVideoViewController"]) {
         if (hud.superview) [hud removeFromSuperview];
+        if (mon.superview) [mon removeFromSuperview];
         curVC = nil; wasVisible = NO; return;
     }
     if (vc != curVC) {                                   // phien phat moi
         curVC = vc; vcStart = [NSDate date]; visStart = nil; wasVisible = NO; speed = 0; best = -1; lastT = nil;
+        lastCT = -1; lastAdvance = nil; stalls = 0; wasStall = NO; lastSig = -1;
         for (int i = 0; i < sf_ls_n; i++) { atomic_store(&sf_ls[i].bytes, 0); atomic_store(&sf_ls[i].reads, 0); lastBytes[i] = 0; }
         spinner = nil;
     }
-    UIView *panelV = [vc.view isKindOfClass:[UIView class]] ? vc.view : nil;
+    UIView *panelV = vc.view;
     if (!spinner) spinner = SFFindClass(panelV, @"infuse.VideoControlPanelActivityView", 0);
-    if (!spinner) return;
-    BOOL on = SFLoadHUDOn();
-    for (CALayer *l in spinner.layer.sublayers) l.hidden = on;       // an vong xoay goc (giu nguyen trang thai hien/an de lam tin hieu)
-    if (!on) { if (hud.superview) [hud removeFromSuperview]; return; }
-    BOOL vis = SFEffectivelyVisible(spinner);
-    if (!vis) { wasVisible = NO; if (hud.superview) [hud removeFromSuperview]; return; }
-    if (!wasVisible) { wasVisible = YES; visStart = [NSDate date]; }
 
-    // toc do / nguon: lop co so byte nhieu nhat
+    // ---- so lieu dung chung
     NSDate *now = [NSDate date];
     double dt = lastT ? [now timeIntervalSinceDate:lastT] : 0;
     int top = -1; unsigned long long topB = 0;
@@ -150,34 +224,86 @@ static void SFLoadHUDTick(void) {
 
     BOOL opened = [[vc valueForKey:@"_playerOpeningSucceeded"] boolValue];
     id player = SFObj0(vc, @"player");
-    double elapsed = -[vcStart timeIntervalSinceNow], waited = -[visStart timeIntervalSinceNow];
-    NSString *dots = [@"" stringByPaddingToLength:(NSUInteger)(tickN / 2 % 4) withString:@"." startingAtIndex:0];
-    NSString *stage, *hint = @"";
-    if (!opened) {
-        if (topB == 0) stage = @"Đang kết nối tới nguồn";
-        else if (!player) stage = @"Đang đọc dữ liệu đầu file";
-        else stage = @"Đang phân tích và mở video";
-    } else stage = @"Đang đệm dữ liệu";
-    if (topB == 0 && waited > 6) hint = @"Chưa nhận được dữ liệu — nguồn bận, ngủ đông hoặc mất kết nối";
-    else if (topB > 0 && speed < 150 * 1024 && waited > 4) hint = @"Tốc độ thấp — nguồn/mạng đang chậm";
-    else if (opened && speed > 1.5 * 1024 * 1024 && waited > 3) hint = @"Dữ liệu đã đủ nhanh — máy đang giải mã (codec nặng như AV1/HEVC 10-bit?)";
-    else if (!opened && topB > 0 && speed > 1024 * 1024 && player) hint = @"Đang dựng bộ giải mã và đọc thông tin track";
+    Class PH = NSClassFromString(@"PlayerHelper");
+    id helper = PH ? ((id (*)(id, SEL))objc_msgSend)(PH, NSSelectorFromString(@"currentPlayer")) : nil;
+    double ct = helper ? SFD(helper, @"currentTime") : 0, dur = helper ? SFD(helper, @"duration") : 0;
+    if (lastCT >= 0 && fabs(ct - lastCT) > 0.02) lastAdvance = now;
+    lastCT = ct;
+    BOOL playing = opened && lastAdvance && -[lastAdvance timeIntervalSinceNow] < 1.2;
+    BOOL anim = spinner ? SFAnimating(spinner.layer, 0) : NO;
+    BOOL viewVis = spinner ? SFEffectivelyVisible(spinner) : NO;
+    int sig = (viewVis ? 1 : 0) | (anim ? 2 : 0) | (playing ? 4 : 0) | (opened ? 8 : 0);
+    if (sig != lastSig) { lastSig = sig; SFLog(@"[load] tin hieu: viewVis=%d anim=%d playing=%d opened=%d t=%.1f", viewVis, anim, playing, opened, ct); }
+    BOOL buffering = viewVis && !playing && (opened ? anim : YES);
+    if (opened && buffering && !wasStall) stalls++;
+    wasStall = opened && buffering;
 
-    if (!hud) hud = [SFLoadHUDView new];
-    UIView *host = spinner.superview;
-    if (hud.superview != host) { [hud removeFromSuperview]; [host addSubview:hud]; }
-    hud.l1.text = [stage stringByAppendingString:dots];
+    double elapsed = -[vcStart timeIntervalSinceNow];
     NSString *srcName = top >= 0 ? SFSourceLabel(sf_ls[top].name) : @"—";
-    hud.l2.text = [NSString stringWithFormat:@"%@ · %@ · %.2f MB/s · %.0fs", srcName, SFMB(topB), speed / 1048576.0, waited];
-    hud.l3.text = hint; hud.l3.hidden = hint.length == 0;
-    CGFloat W = MIN(320, host.bounds.size.width - 32);
-    CGSize sz = [hud systemLayoutSizeFittingSize:CGSizeMake(W, 0) withHorizontalFittingPriority:UILayoutPriorityRequired verticalFittingPriority:UILayoutPriorityFittingSizeLevel];
-    CGFloat y = CGRectGetMaxY(spinner.frame) + 8;
-    if (y + sz.height > host.bounds.size.height - 8) y = MAX(8, CGRectGetMinY(spinner.frame) - sz.height - 8);
-    hud.frame = CGRectMake((host.bounds.size.width - W) / 2, y, W, sz.height);
-    [host bringSubviewToFront:hud];
 
-    // chi de nghien cuu: ghi dinh dang cache cua thanh tien trinh vao log (toi da 3 lan)
+    // ---- man hinh tai chi tiet (thay vong xoay)
+    BOOL on = SFLoadHUDOn();
+    if (spinner) {
+        if (on && !spinner.layer.mask) { CALayer *m = [CALayer layer]; m.frame = spinner.bounds; m.backgroundColor = nil; spinner.layer.mask = m; }
+        if (!on && spinner.layer.mask) spinner.layer.mask = nil;
+    }
+    if (on && spinner && buffering) {
+        if (!wasVisible) { wasVisible = YES; visStart = now; }
+        double waited = -[visStart timeIntervalSinceNow];
+        NSString *dots = [@"" stringByPaddingToLength:(NSUInteger)(tickN / 2 % 4) withString:@"..." startingAtIndex:0];
+        NSString *stage, *hint = @"";
+        if (!opened) {
+            if (topB == 0) stage = @"Đang kết nối tới nguồn";
+            else if (!player) stage = @"Đang đọc dữ liệu đầu file";
+            else stage = @"Đang phân tích và mở video";
+        } else stage = @"Đang đệm dữ liệu";
+        if (topB == 0 && waited > 6) hint = @"Chưa nhận được dữ liệu — nguồn bận, ngủ đông hoặc mất kết nối";
+        else if (topB > 0 && speed < 150 * 1024 && waited > 4) hint = @"Tốc độ thấp — nguồn/mạng đang chậm";
+        else if (opened && speed > 1.5 * 1024 * 1024 && waited > 3) hint = @"Dữ liệu đã đủ nhanh — máy đang giải mã (codec nặng như AV1/HEVC 10-bit?)";
+        else if (!opened && topB > 0 && speed > 1024 * 1024 && player) hint = @"Đang dựng bộ giải mã và đọc thông tin track";
+        if (!hud) hud = [SFLoadHUDView new];
+        UIView *host = spinner.superview;
+        if (hud.superview != host) { [hud removeFromSuperview]; [host addSubview:hud]; }
+        hud.l1.text = [stage stringByAppendingString:dots];
+        hud.l2.text = [NSString stringWithFormat:@"%@ · %@ · %.2f MB/s · %.0fs", srcName, SFMB(topB), speed / 1048576.0, waited];
+        hud.l3.text = hint; hud.l3.hidden = hint.length == 0;
+        CGFloat W = MIN(320, host.bounds.size.width - 32);
+        CGSize sz = [hud systemLayoutSizeFittingSize:CGSizeMake(W, 0) withHorizontalFittingPriority:UILayoutPriorityRequired verticalFittingPriority:UILayoutPriorityFittingSizeLevel];
+        CGFloat y = CGRectGetMaxY(spinner.frame) + 8;
+        if (y + sz.height > host.bounds.size.height - 8) y = MAX(8, CGRectGetMinY(spinner.frame) - sz.height - 8);
+        hud.frame = CGRectMake((host.bounds.size.width - W) / 2, y, W, sz.height);
+        [host bringSubviewToFront:hud];
+    } else {
+        wasVisible = NO;
+        if (hud.superview) [hud removeFromSuperview];
+    }
+
+    // ---- bang theo doi lien tuc
+    BOOL monOn = [[NSUserDefaults standardUserDefaults] boolForKey:@"sf.monbtn"] && SFMonShown();
+    if (monOn) {
+        if (!mon) mon = [SFMonView new];
+        if (mon.superview != vc.view) {
+            [mon removeFromSuperview]; [vc.view addSubview:mon];
+            NSUserDefaults *u = [NSUserDefaults standardUserDefaults];
+            double fx = [u objectForKey:@"sf.monx"] ? [u doubleForKey:@"sf.monx"] : 0.22, fy = [u objectForKey:@"sf.mony"] ? [u doubleForKey:@"sf.mony"] : 0.35;
+            [mon layoutIfNeeded];
+            CGSize s = [mon systemLayoutSizeFittingSize:UILayoutFittingCompressedSize];
+            mon.bounds = CGRectMake(0, 0, s.width, s.height);
+            mon.center = CGPointMake(vc.view.bounds.size.width * fx, vc.view.bounds.size.height * fy);
+            mon.transform = CGAffineTransformMakeScale(SFMonScale(), SFMonScale());
+        }
+        NSString *state = !opened ? @"Đang tải" : (playing ? @"Đang phát" : (buffering ? @"Đang đệm" : @"Tạm dừng"));
+        double avg = elapsed > 1 ? topB / elapsed : 0;
+        NSProcessInfo *pi = [NSProcessInfo processInfo];
+        NSString *th = @[ @"bình thường", @"hơi ấm", @"nóng", @"rất nóng" ][MAX(0, MIN(3, (int)pi.thermalState))];
+        mon.body.text = [NSString stringWithFormat:
+            @"Trạng thái  %@\nVị trí      %@ / %@\nNguồn       %@\nĐã đọc      %@\nTốc độ      %.2f MB/s (TB %.2f)\nĐứng hình   %d lần\nNhiệt máy   %@%@",
+            state, SFTimeStr(ct), SFTimeStr(dur), srcName, SFMB(topB), speed / 1048576.0, avg / 1048576.0, stalls, th, pi.lowPowerModeEnabled ? @"\nTiết kiệm pin: BẬT" : @""];
+        CGSize s = [mon systemLayoutSizeFittingSize:UILayoutFittingCompressedSize];
+        CGPoint c = mon.center; mon.bounds = CGRectMake(0, 0, s.width, s.height); mon.center = c;
+        [vc.view bringSubviewToFront:mon];
+    } else if (mon.superview) [mon removeFromSuperview];
+
     if (cacheLogs < 3 && (!lastCacheLog || -[lastCacheLog timeIntervalSinceNow] > 5)) {
         UIView *cl = SFFindClass(panelV, @"FCProgressBarCacheLineView", 0);
         if (cl) { lastCacheLog = now; cacheLogs++; SFLog(@"[load] cacheRanges=%@ opened=%d player=%d top=%d bytes=%llu", SFObj0(cl, @"cachedRanges"), opened, player != nil, top, topB); }

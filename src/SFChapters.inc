@@ -264,6 +264,7 @@ static void (*sf_orig_ph_skip)(id, SEL, double);
 static id (*sf_orig_keyfor)(id, SEL, id);
 // ---- nut chuyen chuong (khong phu thuoc mang/metadata): Prev / Next canh nut (i)
 static NSHashTable *sf_navBtns;
+static void SFMonToggle(void);
 static NSInteger SFNavMode(void) { return [[NSUserDefaults standardUserDefaults] integerForKey:@"sf.chapnav"]; }   // 0 tat, 1 lui, 2 tien, 3 ca hai
 static void SFNavGo(BOOL forward) {
     id helper = nil;
@@ -291,7 +292,8 @@ static id sf_hooked_addintro(id self, SEL _cmd, id stack) {
     @try {
         NSInteger mode = SFNavMode();
         UIStackView *st = [stack isKindOfClass:[UIStackView class]] ? stack : nil;
-        if (!st || mode <= 0) return r;
+        BOOL wantMon = [[NSUserDefaults standardUserDefaults] boolForKey:@"sf.monbtn"];
+        if (!st || (mode <= 0 && !wantMon)) return r;
         for (UIView *v in st.arrangedSubviews) if ([v.accessibilityIdentifier hasPrefix:@"sf_chap_"]) return r;
         UIView *intro = nil; NSUInteger idx = NSNotFound;
         NSArray *subs = st.arrangedSubviews;
@@ -300,7 +302,18 @@ static id sf_hooked_addintro(id self, SEL _cmd, id stack) {
         if (idx == NSNotFound) idx = legacy ? subs.count : MIN((NSUInteger)1, subs.count);
         if (!sf_navBtns) sf_navBtns = [NSHashTable weakObjectsHashTable];
         NSMutableArray *btns = [NSMutableArray array];
-        for (int k = 0; k < 2; k++) {
+        if (wantMon) {
+            UIButton *mb = [UIButton buttonWithType:UIButtonTypeSystem];
+            mb.accessibilityIdentifier = @"sf_chap_mon";
+            mb.translatesAutoresizingMaskIntoConstraints = NO;
+            mb.tintColor = [UIColor colorWithWhite:1 alpha:legacy ? 1.0 : 0.9];
+            [mb setImage:[UIImage systemImageNamed:@"chart.bar.xaxis"] forState:UIControlStateNormal];
+            [mb.widthAnchor constraintEqualToConstant:24].active = YES;
+            [mb.heightAnchor constraintEqualToConstant:24].active = YES;
+            [mb addAction:[UIAction actionWithHandler:^(UIAction *a) { SFMonToggle(); }] forControlEvents:UIControlEventTouchUpInside];
+            [btns addObject:mb];
+        }
+        for (int k = 0; k < 2 && mode > 0; k++) {
             BOOL fwd = (k == 1);
             if (!(fwd ? (mode & 2) : (mode & 1))) continue;
             UIButton *b = [UIButton buttonWithType:UIButtonTypeSystem];

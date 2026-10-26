@@ -203,7 +203,7 @@ static NSArray *SFModes(void) { return @[ @"manual", @"launch", @"hourly", @"12h
 - (void)viewDidLoad { [super viewDidLoad]; self.title = @"Tìm sub"; self.sources = [[SFEngine shared] sourceList]; }
 - (NSUInteger)dataSignature { self.sources = [[SFEngine shared] sourceList]; return [self.sources description].hash ^ (NSUInteger)[[SFEngine shared] runningCount]; }
 - (NSInteger)numberOfSectionsInTableView:(UITableView *)tv { return 4; }
-- (NSInteger)tableView:(UITableView *)tv numberOfRowsInSection:(NSInteger)s { return s == 0 ? 2 : (s == 1 ? 1 : (s == 2 ? 3 : (NSInteger)self.sources.count)); }
+- (NSInteger)tableView:(UITableView *)tv numberOfRowsInSection:(NSInteger)s { return s == 0 ? 2 : (s == 1 ? 1 : (s == 2 ? 4 : (NSInteger)self.sources.count)); }
 - (NSString *)tableView:(UITableView *)tv titleForHeaderInSection:(NSInteger)s { return s == 1 ? @"TỰ ĐỘNG LÀM MỚI" : (s == 2 ? @"THÔNG BÁO & TẢI VIDEO" : (s == 3 ? @"NGUỒN (BẤM VÀO ĐỂ XEM THƯ MỤC)" : nil)); }
 - (NSString *)tableView:(UITableView *)tv titleForFooterInSection:(NSInteger)s {
     return s == 3 ? @"Sub thêm/xóa trong thư mục tự cập nhật vào chỉ mục (nguồn iPhone cập nhật nền mỗi vài giây)." : nil;
@@ -245,6 +245,13 @@ static NSArray *SFModes(void) { return @[ @"manual", @"launch", @"hourly", @"12h
             sw.on = [e toastEnabled];
             [sw addTarget:self action:@selector(toastSwitched:) forControlEvents:UIControlEventValueChanged];
             c.accessoryView = sw;
+        } else if (ip.row == 3) {
+            c.textLabel.text = @"Nút bảng theo dõi trong player (bên trái nút i)";
+            c.textLabel.numberOfLines = 2;
+            UISwitch *sw = [[UISwitch alloc] init];
+            sw.on = [[NSUserDefaults standardUserDefaults] boolForKey:@"sf.monbtn"];
+            [sw addTarget:self action:@selector(monSwitched:) forControlEvents:UIControlEventValueChanged];
+            c.accessoryView = sw;
         } else if (ip.row == 2) {
             c.textLabel.text = @"Màn hình tải chi tiết (thay vòng xoay)";
             c.textLabel.numberOfLines = 2;
@@ -284,6 +291,7 @@ static NSArray *SFModes(void) { return @[ @"manual", @"launch", @"hourly", @"12h
     [c updateFromEngine];
     return c;
 }
+- (void)monSwitched:(UISwitch *)sw { [[NSUserDefaults standardUserDefaults] setBool:sw.on forKey:@"sf.monbtn"]; if (!sw.on) [[NSUserDefaults standardUserDefaults] setBool:NO forKey:@"sf.monshow"]; }
 - (void)hudSwitched:(UISwitch *)sw { [[NSUserDefaults standardUserDefaults] setBool:sw.on forKey:@"sf.loadhud"]; }
 - (void)toastSwitched:(UISwitch *)sw { [[SFEngine shared] setToastEnabled:sw.on]; }
 - (void)modeChanged:(UISegmentedControl *)seg { [[SFEngine shared] setAutoMode:SFModes()[(NSUInteger)seg.selectedSegmentIndex]]; }
