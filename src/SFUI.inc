@@ -182,6 +182,23 @@ static NSString *SFDate(double t) {
 
 static NSArray *SFModes(void) { return @[ @"manual", @"launch", @"hourly", @"12h" ]; }
 
+@interface SFSecsPicker : NSObject <UIPickerViewDataSource, UIPickerViewDelegate>
+@end
+@implementation SFSecsPicker
+- (NSInteger)numberOfComponentsInPickerView:(UIPickerView *)p { return 1; }
+- (NSInteger)pickerView:(UIPickerView *)p numberOfRowsInComponent:(NSInteger)c { return 10; }
+- (CGFloat)pickerView:(UIPickerView *)p rowHeightForComponent:(NSInteger)c { return 34; }
+- (UIView *)pickerView:(UIPickerView *)p viewForRow:(NSInteger)row forComponent:(NSInteger)c reusingView:(UIView *)v {
+    UILabel *l = [v isKindOfClass:[UILabel class]] ? (UILabel *)v : [[UILabel alloc] init];
+    l.text = [NSString stringWithFormat:@"%ld giây", (long)row + 1];
+    l.textAlignment = NSTextAlignmentCenter;
+    l.font = [UIFont systemFontOfSize:17 weight:UIFontWeightMedium];
+    l.textColor = p.tintColor;
+    return l;
+}
+- (void)pickerView:(UIPickerView *)p didSelectRow:(NSInteger)row inComponent:(NSInteger)c { [[SFEngine shared] setToastSeconds:row + 1]; }
+@end
+
 @implementation SFSettingsVC
 - (void)viewDidLoad { [super viewDidLoad]; self.title = @"Tìm sub"; self.sources = [[SFEngine shared] sourceList]; }
 - (NSUInteger)dataSignature { self.sources = [[SFEngine shared] sourceList]; return [self.sources description].hash ^ (NSUInteger)[[SFEngine shared] runningCount]; }
@@ -230,30 +247,16 @@ static NSArray *SFModes(void) { return @[ @"manual", @"launch", @"hourly", @"12h
             c.accessoryView = sw;
         } else {
             c.textLabel.text = @"Tự tắt sau";
-            // nut dang "10 giay" nhu InfusePlus: bam ra danh sach 1-10 giay de chon
-            UIButton *b = [UIButton buttonWithType:UIButtonTypeSystem];
-            void (^refresh)(UIButton *) = ^(UIButton *bt) {
-                [bt setTitle:[NSString stringWithFormat:@"%ld giây", (long)[[SFEngine shared] toastSeconds]] forState:UIControlStateNormal];
-                [bt sizeToFit];
-                CGRect f = bt.frame; f.size.width += 28; f.size.height = 32; bt.frame = f;
-            };
-            b.titleLabel.font = [UIFont systemFontOfSize:17];
-            b.backgroundColor = [UIColor colorWithWhite:1 alpha:0.1];
-            b.layer.cornerRadius = 8;
-            __weak UIButton *wb = b;
-            NSMutableArray *acts = [NSMutableArray array];
-            for (NSInteger n = 1; n <= 10; n++) {
-                UIAction *a = [UIAction actionWithTitle:[NSString stringWithFormat:@"%ld giây", (long)n] image:nil identifier:nil handler:^(UIAction *act) {
-                    [[SFEngine shared] setToastSeconds:n];
-                    UIButton *bb = wb; if (bb) refresh(bb);
-                }];
-                a.state = ([e toastSeconds] == n) ? UIMenuElementStateOn : UIMenuElementStateOff;
-                [acts addObject:a];
-            }
-            b.menu = [UIMenu menuWithTitle:@"" children:acts];
-            b.showsMenuAsPrimaryAction = YES;
-            refresh(b);
-            c.accessoryView = b;
+            // banh xe cuon nho (nhu 3 nut "10 giay" cua InfusePlus): vuot len xuong de chon 1-10 giay
+            UIPickerView *pk = [[UIPickerView alloc] initWithFrame:CGRectMake(0, 0, 110, 34)];
+            SFSecsPicker *pd = [SFSecsPicker new];
+            pk.dataSource = pd; pk.delegate = pd;
+            objc_setAssociatedObject(pk, "sfpd", pd, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            pk.backgroundColor = [UIColor colorWithWhite:1 alpha:0.1];
+            pk.layer.cornerRadius = 8;
+            pk.clipsToBounds = YES;
+            [pk selectRow:MAX(0, MIN(9, [e toastSeconds] - 1)) inComponent:0 animated:NO];
+            c.accessoryView = pk;
         }
         return c;
     }

@@ -175,13 +175,56 @@ static void SFApplyChapters(id asset) {
 }
 
 static void (*sf_orig_skip)(id, SEL, double, id);
+static float sf_askOverride = 0;
+static BOOL sf_inAsk = NO;
+static __weak id sf_heldToast;
+static double sf_heldStart, sf_heldEnd;
+static void (*sf_orig_toast)(id, SEL, id, double, id, id);
+static void sf_hooked_toast(id self, SEL _cmd, id text, double dur, id title, id block) {
+    sf_orig_toast(self, _cmd, text, dur, title, block);
+    if (sf_inAsk) sf_heldToast = self;
+}
+static void SFHideHeldToast(void) {
+    id t = sf_heldToast; sf_heldToast = nil;
+    if (t && [t respondsToSelector:NSSelectorFromString(@"hideImmediately")]) {
+        dispatch_async(dispatch_get_main_queue(), ^{ ((void (*)(id, SEL))objc_msgSend)(t, NSSelectorFromString(@"hideImmediately")); });
+    }
+}
+
+// Tua lai vao doan da di qua: xoa danh dau "da xu ly" khi thoi diem roi khoi doan -> lan vao lai se hien nut skip tiep.
+static NSMutableSet *sf_inside;
+static __weak id sf_lastItem;
+static BOOL sf_lastOn = YES;
+static void SFReshowTick(id ctl, double t, id asset) {
+    if (![[NSUserDefaults standardUserDefaults] boolForKey:@"sf.reshow"]) return;
+    Class MgrC = NSClassFromString(@"INFPIntroManager");
+    id mgr = MgrC ? ((id (*)(id, SEL))objc_msgSend)(MgrC, NSSelectorFromString(@"sharedManager")) : nil;
+    id intro = mgr ? ((id (*)(id, SEL, id))objc_msgSend)(mgr, NSSelectorFromString(@"introForAsset:"), asset) : nil;
+    NSArray *segs = intro ? SFObj0(intro, @"segments") : nil;
+    NSMutableSet *skipped = [ctl valueForKey:@"_skippedSegments"];
+    if (![segs isKindOfClass:[NSArray class]] || ![skipped isKindOfClass:[NSMutableSet class]]) return;
+    if (!sf_inside) sf_inside = [NSMutableSet set];
+    for (id seg in segs) {
+        NSString *uuid = SFStr0(seg, @"uuid");
+        if (!uuid.length) continue;
+        double st = SFD(seg, @"start");
+        double en = ((double (*)(id, SEL, id))objc_msgSend)(ctl, NSSelectorFromString(@"effectiveEndForSegment:"), seg);
+        BOOL inside = t >= st && t < en;
+        if (inside) [sf_inside addObject:uuid];
+        else if ([sf_inside containsObject:uuid]) { [sf_inside removeObject:uuid]; [skipped removeObject:uuid]; }
+    }
+}
+
 static void sf_hooked_skip(id self, SEL _cmd, double t, id asset) {
     @try { SFApplyChapters(asset); } @catch (NSException *e) { SFLog(@"[chap] loi: %@", e); }
+    @try {
+        if (sf_heldToast && (t < sf_heldStart - 0.5 || t >= sf_heldEnd)) SFHideHeldToast();   // roi khoi doan -> bo nut skip dang giu
+        SFReshowTick(self, t, asset);
+    } @catch (NSException *e) { SFLog(@"[chap] loi reshow: %@", e); }
     sf_orig_skip(self, _cmd, t, asset);
 }
 
 // "Skip Alert: giu den het doan": thoi luong thong bao Ask = phan con lai cua doan
-static float sf_askOverride = 0;
 static float (*sf_orig_floatForKey)(id, SEL, id);
 static float sf_hooked_floatForKey(id self, SEL _cmd, id key) {
     if (sf_askOverride > 0 && [key isKindOfClass:[NSString class]] && [(NSString *)key isEqualToString:@"skipAlertDuration"]) return sf_askOverride;
@@ -203,7 +246,11 @@ static void sf_hooked_handle(id self, SEL _cmd, id seg, double t) {
                     if (end <= 0) { id h = sf_lastHelper; end = SFD(h, @"duration"); }
                     sf_askOverride = (float)MAX(2.0, end - t);
                 }
+                sf_inAsk = YES;
+                sf_heldStart = SFD(seg, @"start");
+                { double e2 = SFD(seg, @"end"); if (e2 <= 0) e2 = SFD(sf_lastHelper, @"duration"); sf_heldEnd = e2; }
                 ((void (*)(id, SEL, id))objc_msgSend)(self, NSSelectorFromString(@"askBeforeSkipping:"), seg);
+                sf_inAsk = NO;
                 sf_askOverride = 0;
                 return;
             }
@@ -217,6 +264,27 @@ static void (*sf_orig_ph_skip)(id, SEL, double);
 static id (*sf_orig_keyfor)(id, SEL, id);
 static void sf_hooked_ph_skip(id self, SEL _cmd, double t) {
     sf_lastHelper = self;
+    {   // doi tap (bam "tap tiep theo" / het video) -> bo nut skip cu + reset trang thai
+        id mi0 = SFObj0(self, @"mediaItem");
+        if (mi0 != sf_lastItem) {
+            sf_lastItem = mi0;
+            SFHideHeldToast();
+            [sf_inside removeAllObjects];
+        }
+        // nut (i) bat lai -> cho phep hien lai nut skip cua doan dang o trong
+        Class UD1 = NSClassFromString(@"INFUserDefaults");
+        BOOL on = UD1 ? ((BOOL (*)(id, SEL, id))objc_msgSend)(UD1, NSSelectorFromString(@"boolForKey:"), @"skipIntros") : YES;
+        if (on && !sf_lastOn) {
+            id ic0 = SFObj0(self, @"introController");
+            NSMutableSet *sk = ic0 ? [ic0 valueForKey:@"_skippedSegments"] : nil;
+            if ([sk isKindOfClass:[NSMutableSet class]]) [sk removeAllObjects];
+        }
+        sf_lastOn = on;
+    }
+    {   // nut (i) tat "Skip Intros" -> an luon nut skip dang giu tren man hinh
+        Class UD0 = NSClassFromString(@"INFUserDefaults");
+        if (sf_heldToast && UD0 && !((BOOL (*)(id, SEL, id))objc_msgSend)(UD0, NSSelectorFromString(@"boolForKey:"), @"skipIntros")) SFHideHeldToast();
+    }
     sf_orig_ph_skip(self, _cmd, t);
     @try {
         id mi = SFObj0(self, @"mediaItem");
@@ -353,7 +421,10 @@ static id sf_hooked_ics_init(id self, SEL _cmd, NSInteger style) {
                 for (id row in main) {
                     [nm addObject:row];
                     if ([row isKindOfClass:[NSDictionary class]] && [row[@"key"] isEqualToString:@"skipAlertDuration"])
+                    {
                         [nm addObject:@{ @"type": @"sfswitch", @"title": @"Skip Alert: hold until segment ends", @"id": @"sfswitch", @"style": @0, @"image": @"timer", @"sfswitchkey": @"sf.skipinf" }];
+                        [nm addObject:@{ @"type": @"sfswitch", @"title": @"Show Skip again when seeking back", @"id": @"sfswitch", @"style": @0, @"image": @"backward.end.alt", @"sfswitchkey": @"sf.reshow" }];
+                    }
                 }
                 if (nm.count == main.count) nm = nil;
             }
@@ -383,6 +454,9 @@ static BOOL SFTryInstallChapters(void) {
             Class UD = NSClassFromString(@"INFUserDefaults");
             Method mf = UD ? class_getClassMethod(UD, NSSelectorFromString(@"floatForKey:")) : NULL;
             if (mf) { sf_orig_floatForKey = (float (*)(id, SEL, id))method_getImplementation(mf); method_setImplementation(mf, (IMP)sf_hooked_floatForKey); }
+            Class TV = NSClassFromString(@"ToastView");
+            Method mt = TV ? class_getInstanceMethod(TV, NSSelectorFromString(@"showProgressiveToastWithText:duration:actionTitle:actionCompletion:")) : NULL;
+            if (mt) { sf_orig_toast = (void (*)(id, SEL, id, double, id, id))method_getImplementation(mt); method_setImplementation(mt, (IMP)sf_hooked_toast); }
             h1 = YES; SFLog(@"[chap] da hook INFPIntroController skipIntroIfNeeded:withAsset: + handleSegment:");
         }
     }
