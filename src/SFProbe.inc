@@ -89,6 +89,7 @@ static BOOL SFProbeHasPlayerView(UIView *v, int d) {
     return NO;
 }
 static void SFProbeTick(void) {
+    if (![[NSUserDefaults standardUserDefaults] boolForKey:@"sf.probe"]) return;
     static int ticks; ticks++;
     if (ticks == 10) { SFProbeWrite([NSString stringWithFormat:@"probe khoi dong %@\n", [NSDate date]]); SFProbeClassesOnce(); SFLog(@"[probe] da ghi probe.txt (danh sach lop)"); }
     {

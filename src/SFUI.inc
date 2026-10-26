@@ -203,7 +203,7 @@ static NSArray *SFModes(void) { return @[ @"manual", @"launch", @"hourly", @"12h
 - (void)viewDidLoad { [super viewDidLoad]; self.title = @"Tìm sub"; self.sources = [[SFEngine shared] sourceList]; }
 - (NSUInteger)dataSignature { self.sources = [[SFEngine shared] sourceList]; return [self.sources description].hash ^ (NSUInteger)[[SFEngine shared] runningCount]; }
 - (NSInteger)numberOfSectionsInTableView:(UITableView *)tv { return 4; }
-- (NSInteger)tableView:(UITableView *)tv numberOfRowsInSection:(NSInteger)s { return s == 0 ? 2 : (s == 1 ? 1 : (s == 2 ? 4 : (NSInteger)self.sources.count)); }
+- (NSInteger)tableView:(UITableView *)tv numberOfRowsInSection:(NSInteger)s { return s == 0 ? 2 : (s == 1 ? 1 : (s == 2 ? 6 : (NSInteger)self.sources.count)); }
 - (NSString *)tableView:(UITableView *)tv titleForHeaderInSection:(NSInteger)s { return s == 1 ? @"TỰ ĐỘNG LÀM MỚI" : (s == 2 ? @"THÔNG BÁO & TẢI VIDEO" : (s == 3 ? @"NGUỒN (BẤM VÀO ĐỂ XEM THƯ MỤC)" : nil)); }
 - (NSString *)tableView:(UITableView *)tv titleForFooterInSection:(NSInteger)s {
     return s == 3 ? @"Sub thêm/xóa trong thư mục tự cập nhật vào chỉ mục (nguồn iPhone cập nhật nền mỗi vài giây)." : nil;
@@ -244,6 +244,14 @@ static NSArray *SFModes(void) { return @[ @"manual", @"launch", @"hourly", @"12h
             UISwitch *sw = [[UISwitch alloc] init];
             sw.on = [e toastEnabled];
             [sw addTarget:self action:@selector(toastSwitched:) forControlEvents:UIControlEventValueChanged];
+            c.accessoryView = sw;
+        } else if (ip.row == 4 || ip.row == 5) {
+            BOOL isLog = ip.row == 4;
+            c.textLabel.text = isLog ? @"Ghi log (log.txt)" : @"Probe dò lỗi (probe.txt)";
+            UISwitch *sw = [[UISwitch alloc] init];
+            sw.tag = isLog ? 1 : 2;
+            sw.on = isLog ? ![[NSUserDefaults standardUserDefaults] boolForKey:@"sf.logoff"] : [[NSUserDefaults standardUserDefaults] boolForKey:@"sf.probe"];
+            [sw addTarget:self action:@selector(dbgSwitched:) forControlEvents:UIControlEventValueChanged];
             c.accessoryView = sw;
         } else if (ip.row == 3) {
             c.textLabel.text = @"Nút bảng theo dõi trong player (bên trái nút i)";
@@ -292,6 +300,7 @@ static NSArray *SFModes(void) { return @[ @"manual", @"launch", @"hourly", @"12h
     return c;
 }
 - (void)monSwitched:(UISwitch *)sw { [[NSUserDefaults standardUserDefaults] setBool:sw.on forKey:@"sf.monbtn"]; if (!sw.on) [[NSUserDefaults standardUserDefaults] setBool:NO forKey:@"sf.monshow"]; }
+- (void)dbgSwitched:(UISwitch *)sw { NSUserDefaults *d = [NSUserDefaults standardUserDefaults]; if (sw.tag == 1) [d setBool:!sw.on forKey:@"sf.logoff"]; else [d setBool:sw.on forKey:@"sf.probe"]; }
 - (void)hudSwitched:(UISwitch *)sw { [[NSUserDefaults standardUserDefaults] setBool:sw.on forKey:@"sf.loadhud"]; }
 - (void)toastSwitched:(UISwitch *)sw { [[SFEngine shared] setToastEnabled:sw.on]; }
 - (void)modeChanged:(UISegmentedControl *)seg { [[SFEngine shared] setAutoMode:SFModes()[(NSUInteger)seg.selectedSegmentIndex]]; }

@@ -189,11 +189,74 @@ static BOOL SFAnimating(CALayer *l, int d) {
     return NO;
 }
 
+
+static void SFHideRewind(UIView *root) {
+    static NSArray *labels;
+    if (!labels) {
+        NSMutableArray *a = [NSMutableArray array];
+        for (NSString *k in @[ @"pcVORewindBack", @"pcVORewindForward" ]) {
+            NSString *v = [[NSBundle mainBundle] localizedStringForKey:k value:@"" table:nil];
+            if (v.length) [a addObject:v];
+        }
+        labels = a;
+    }
+    if (!labels.count) return;
+    NSMutableArray *stack = [NSMutableArray arrayWithObject:root];
+    int guard = 0;
+    while (stack.count && guard++ < 600) {
+        UIView *v = stack.lastObject; [stack removeLastObject];
+        if ([v isKindOfClass:[UIButton class]] && v.accessibilityLabel && [labels containsObject:v.accessibilityLabel]) {
+            if (!v.hidden) v.hidden = YES;
+            continue;
+        }
+        [stack addObjectsFromArray:v.subviews];
+    }
+}
+
+// ---- chan "giu de tang toc 2x" goc cua Infuse khi InfusePlus 'longTapToSpeed' dang tat
+static void (*sf_orig_setrate)(id, SEL, float);
+static float sf_normalRate = 1.0f;
+static ptrdiff_t sf_2xOff = -1;
+static BOOL SFIs2x(id pc) {
+    if (sf_2xOff < 0) return NO;
+    return *((uint8_t *)(__bridge void *)pc + sf_2xOff) != 0;
+}
+static void sf_hooked_setrate(id self, SEL _cmd, float r) {
+    Class UDc = NSClassFromString(@"INFUserDefaults");
+    BOOL longTap = UDc ? ((BOOL (*)(id, SEL, id))objc_msgSend)(UDc, NSSelectorFromString(@"boolForKey:"), @"longTapToSpeed") : YES;
+    if (!SFIs2x(self) && r != 2.0f) sf_normalRate = r;
+    sf_orig_setrate(self, _cmd, r);
+    if (longTap || r != 2.0f) return;
+    __weak id wself = self;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        id s = wself; if (!s) return;
+        if (SFIs2x(s)) { SFLog(@"[2x] chan tang toc giu man hinh, tra ve %.2fx", sf_normalRate); sf_orig_setrate(s, _cmd, sf_normalRate); }
+    });
+}
+static BOOL sf_speedHooked = NO;
+static void SFInstallSpeedFix(void) {
+    if (sf_speedHooked) return;
+    Class c = NSClassFromString(@"infuse.PlaybackController"); if (!c) c = NSClassFromString(@"_TtC6infuse18PlaybackController");
+    if (!c) return;
+    Method m = class_getInstanceMethod(c, NSSelectorFromString(@"setPlaybackRate:"));
+    Ivar iv = class_getInstanceVariable(c, "isSpeed2xMode");
+    if (!m) return;
+    char *a2 = method_copyArgumentType(m, 2);
+    SFLog(@"[2x] setPlaybackRate: enc=%s arg=%s ivar=%d off=%ld", method_getTypeEncoding(m), a2, iv != NULL, iv ? (long)ivar_getOffset(iv) : -1L);
+    BOOL isFloat = a2 && a2[0] == 'f'; free(a2);
+    if (!iv || !isFloat) { sf_speedHooked = YES; return; }
+    sf_2xOff = ivar_getOffset(iv);
+    sf_orig_setrate = (void (*)(id, SEL, float))method_getImplementation(m);
+    method_setImplementation(m, (IMP)sf_hooked_setrate);
+    sf_speedHooked = YES;
+}
+
 static void SFLoadHUDTick(void) {
     static __weak id curVC; static NSDate *vcStart, *visStart; static BOOL wasVisible;
     static unsigned long long lastBytes[SF_LS_MAX]; static NSDate *lastT; static double speed; static int best = -1;
     static __weak UIView *spinner; static SFLoadHUDView *hud; static SFMonView *mon; static int tickN; static NSDate *lastCacheLog; static int cacheLogs;
     static double lastCT = -1; static NSDate *lastAdvance; static int stalls; static BOOL wasStall; static int lastSig = -1;
+    static NSDate *stopSince, *cacheFix, *cacheDraw; static __weak UIView *cacheLine;
     tickN++;
     UIViewController *vc = SFProbeTopVC();
     if (![NSStringFromClass([vc class]) isEqualToString:@"FCVideoViewController"]) {
@@ -240,6 +303,50 @@ static void SFLoadHUDTick(void) {
 
     double elapsed = -[vcStart timeIntervalSinceNow];
     NSString *srcName = top >= 0 ? SFSourceLabel(sf_ls[top].name) : @"—";
+
+
+    // ---- thong ke giai ma cua Infuse (FCPlaybackStatistics)
+    id tracker = SFObj0(vc, @"_playbackStatisticsTracker"); if (!tracker) tracker = [vc valueForKey:@"_playbackStatisticsTracker"];
+    id pst = tracker ? SFObj0(tracker, @"playbackStatistics") : nil;
+    double fps = 0; BOOL soft = NO; int fullBuf = 0; NSString *ptypes = @"";
+    if (pst) {
+        @try { fps = [[pst valueForKey:@"fpsRate"] doubleValue]; soft = [[pst valueForKey:@"fallbackedToSoftware"] boolValue];
+               fullBuf = [[pst valueForKey:@"fullBufferings"] intValue]; ptypes = [[[pst valueForKey:@"usedPlayerTypes"] allObjects] componentsJoinedByString:@","] ?: @""; } @catch (...) {}
+    }
+    // ---- dung hinh khong co vong xoay (khong phai cho mang) -> ghi log nguyen nhan
+    if (opened && !playing && !buffering) { if (!stopSince) stopSince = now; }
+    else if (stopSince) {
+        double d = -[stopSince timeIntervalSinceNow]; stopSince = nil;
+        if (d > 0.8 && d < 30 && playing) {
+            NSProcessInfo *pi0 = [NSProcessInfo processInfo];
+            SFLog(@"[stall] dung %.1fs tai t=%.1f (khong co vong xoay) toc do=%.2fMB/s nhiet=%ld lowpower=%d fps=%.1f softFallback=%d player=%@ fullBuf=%d", d, ct, speed / 1048576.0, (long)pi0.thermalState, pi0.lowPowerModeEnabled, fps, soft, ptypes, fullBuf);
+        }
+    }
+
+    // ---- thanh cache (vach trang mo tren thanh tien trinh): giu cho no luon cap nhat
+    if (!cacheLine) cacheLine = SFFindClass(panelV, @"FCProgressBarCacheLineView", 0);
+    if (cacheLine && opened) {
+        UIView *cl = cacheLine;
+        BOOL ctrlVisible = SFEffectivelyVisible(cl) || (cl.window && cl.superview && !cl.hidden);
+        BOOL en = [[cl valueForKey:@"cacheUpdatingEnabled"] boolValue];
+        id timer = SFObj0(cl, @"cacheUpdatingTimer");
+        NSArray *rg = SFObj0(cl, @"cachedRanges");
+        BOOL needFix = (!en || !timer) || (rg.count == 0 && topB > 0 && elapsed > 5);
+        if (ctrlVisible && needFix && (!cacheFix || -[cacheFix timeIntervalSinceNow] > 3)) {
+            cacheFix = now;
+            SFLog(@"[cache] khoi dong lai cap nhat (en=%d timer=%d ranges=%lu)", en, timer != nil, (unsigned long)rg.count);
+            ((void (*)(id, SEL, BOOL))objc_msgSend)(cl, NSSelectorFromString(@"setCacheUpdatingEnabled:"), NO);
+            ((void (*)(id, SEL, BOOL))objc_msgSend)(cl, NSSelectorFromString(@"setCacheUpdatingEnabled:"), YES);
+        }
+        if (ctrlVisible && (!cacheDraw || -[cacheDraw timeIntervalSinceNow] > 1.0)) { cacheDraw = now; [cl setNeedsDisplay]; }
+    }
+
+    // ---- an 2 nut tua cua InfusePlus (Infuse hay bat lai)
+    {
+        Class UDc = NSClassFromString(@"INFUserDefaults");
+        BOOL hideRw = UDc ? ((BOOL (*)(id, SEL, id))objc_msgSend)(UDc, NSSelectorFromString(@"boolForKey:"), @"hideRewindButtons") : NO;
+        if (hideRw) SFHideRewind(panelV);
+    }
 
     // ---- man hinh tai chi tiet (thay vong xoay)
     BOOL on = SFLoadHUDOn();
@@ -297,8 +404,8 @@ static void SFLoadHUDTick(void) {
         NSProcessInfo *pi = [NSProcessInfo processInfo];
         NSString *th = @[ @"bình thường", @"hơi ấm", @"nóng", @"rất nóng" ][MAX(0, MIN(3, (int)pi.thermalState))];
         mon.body.text = [NSString stringWithFormat:
-            @"Trạng thái  %@\nVị trí      %@ / %@\nNguồn       %@\nĐã đọc      %@\nTốc độ      %.2f MB/s (TB %.2f)\nĐứng hình   %d lần\nNhiệt máy   %@%@",
-            state, SFTimeStr(ct), SFTimeStr(dur), srcName, SFMB(topB), speed / 1048576.0, avg / 1048576.0, stalls, th, pi.lowPowerModeEnabled ? @"\nTiết kiệm pin: BẬT" : @""];
+            @"Trạng thái  %@\nVị trí      %@ / %@\nNguồn       %@\nĐã đọc      %@\nTốc độ      %.2f MB/s (TB %.2f)\nĐứng hình   %d lần\nNhiệt máy   %@%@\nGiải mã     %@%@\nFPS         %.1f   Đệm đầy %d",
+            state, SFTimeStr(ct), SFTimeStr(dur), srcName, SFMB(topB), speed / 1048576.0, avg / 1048576.0, stalls, th, pi.lowPowerModeEnabled ? @"\nTiết kiệm pin: BẬT" : @"", ptypes.length ? ptypes : @"—", soft ? @" (phần mềm)" : @"", fps, fullBuf];
         CGSize s = [mon systemLayoutSizeFittingSize:UILayoutFittingCompressedSize];
         CGPoint c = mon.center; mon.bounds = CGRectMake(0, 0, s.width, s.height); mon.center = c;
         [vc.view bringSubviewToFront:mon];
@@ -313,6 +420,7 @@ static void SFLoadHUDTick(void) {
 void SFInstallLoadHUD(void) {
     dispatch_async(dispatch_get_main_queue(), ^{
         SFInstallLoadHooks();
+        SFInstallSpeedFix();
         [NSTimer scheduledTimerWithTimeInterval:0.25 repeats:YES block:^(NSTimer *t) { @try { SFLoadHUDTick(); } @catch (NSException *e) { SFLog(@"[load] loi: %@", e); } }];
     });
 }
