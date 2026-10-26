@@ -303,6 +303,29 @@ static void SFInstallStatsHooks(void) {
     SFLog(@"[report] hook tracker finish=%d full=%d fallback=%d init=%d", m1 != NULL, m2 != NULL, m3 != NULL, m4 != NULL);
 }
 
+
+// ---- vo hieu cu giu man hinh (UILongPressGestureRecognizer toan man hinh cua Infuse) khi bat "Disable stock hold-to-2x"
+static const void *kSFLPOff = &kSFLPOff;
+static void SFScanLongPress(UIView *root, BOOL disable, int depth) {
+    if (depth > 4) return;
+    BOOL big = root.bounds.size.width >= 300 && root.bounds.size.height >= 150;
+    if (big) {
+        for (UIGestureRecognizer *g in root.gestureRecognizers) {
+            if (![g isKindOfClass:[UILongPressGestureRecognizer class]]) continue;
+            NSString *tg = @""; @try { tg = [[g valueForKey:@"_targets"] description]; } @catch (...) {}
+            if ([tg containsString:@"INFP"] || [tg containsString:@"sf_"]) continue;      // cua InfusePlus -> giu nguyen
+            BOOL ours = objc_getAssociatedObject(g, kSFLPOff) != nil;
+            if (disable && g.enabled) {
+                g.enabled = NO; objc_setAssociatedObject(g, kSFLPOff, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                SFLog(@"[2x] tat long-press cua %@ (%.0fx%.0f) min=%.2fs targets=%@", NSStringFromClass([root class]), root.bounds.size.width, root.bounds.size.height, ((UILongPressGestureRecognizer *)g).minimumPressDuration, tg);
+            } else if (!disable && ours && !g.enabled) {
+                g.enabled = YES; objc_setAssociatedObject(g, kSFLPOff, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            }
+        }
+    }
+    for (UIView *v in root.subviews) SFScanLongPress(v, disable, depth + 1);
+}
+
 static void SFHideRewind(UIView *root) {
     static NSArray *labels;
     if (!labels) {
@@ -499,6 +522,7 @@ static void SFLoadHUDTick(void) {
         if (ctrlVisible && (!cacheDraw || -[cacheDraw timeIntervalSinceNow] > 1.0)) { cacheDraw = now; [cl setNeedsDisplay]; }
     }
 
+    { static NSDate *lpT; if (!lpT || -[lpT timeIntervalSinceNow] > 2) { lpT = now; SFScanLongPress(panelV, [[NSUserDefaults standardUserDefaults] boolForKey:@"sf.no2x"], 0); } }
     // ---- an 2 nut tua cua InfusePlus (Infuse hay bat lai)
     {
         Class UDc = NSClassFromString(@"INFUserDefaults");
