@@ -203,8 +203,8 @@ static NSArray *SFModes(void) { return @[ @"manual", @"launch", @"hourly", @"12h
 - (void)viewDidLoad { [super viewDidLoad]; self.title = @"Tìm sub"; self.sources = [[SFEngine shared] sourceList]; }
 - (NSUInteger)dataSignature { self.sources = [[SFEngine shared] sourceList]; return [self.sources description].hash ^ (NSUInteger)[[SFEngine shared] runningCount]; }
 - (NSInteger)numberOfSectionsInTableView:(UITableView *)tv { return 4; }
-- (NSInteger)tableView:(UITableView *)tv numberOfRowsInSection:(NSInteger)s { return s == 0 ? 2 : (s == 1 ? 1 : (s == 2 ? 2 : (NSInteger)self.sources.count)); }
-- (NSString *)tableView:(UITableView *)tv titleForHeaderInSection:(NSInteger)s { return s == 1 ? @"TỰ ĐỘNG LÀM MỚI" : (s == 2 ? @"THÔNG BÁO" : (s == 3 ? @"NGUỒN (BẤM VÀO ĐỂ XEM THƯ MỤC)" : nil)); }
+- (NSInteger)tableView:(UITableView *)tv numberOfRowsInSection:(NSInteger)s { return s == 0 ? 2 : (s == 1 ? 1 : (s == 2 ? 3 : (NSInteger)self.sources.count)); }
+- (NSString *)tableView:(UITableView *)tv titleForHeaderInSection:(NSInteger)s { return s == 1 ? @"TỰ ĐỘNG LÀM MỚI" : (s == 2 ? @"THÔNG BÁO & TẢI VIDEO" : (s == 3 ? @"NGUỒN (BẤM VÀO ĐỂ XEM THƯ MỤC)" : nil)); }
 - (NSString *)tableView:(UITableView *)tv titleForFooterInSection:(NSInteger)s {
     return s == 3 ? @"Sub thêm/xóa trong thư mục tự cập nhật vào chỉ mục (nguồn iPhone cập nhật nền mỗi vài giây)." : nil;
 }
@@ -245,6 +245,14 @@ static NSArray *SFModes(void) { return @[ @"manual", @"launch", @"hourly", @"12h
             sw.on = [e toastEnabled];
             [sw addTarget:self action:@selector(toastSwitched:) forControlEvents:UIControlEventValueChanged];
             c.accessoryView = sw;
+        } else if (ip.row == 2) {
+            c.textLabel.text = @"Màn hình tải chi tiết (thay vòng xoay)";
+            c.textLabel.numberOfLines = 2;
+            UISwitch *sw = [[UISwitch alloc] init];
+            id hv = [[NSUserDefaults standardUserDefaults] objectForKey:@"sf.loadhud"];
+            sw.on = hv ? [hv boolValue] : YES;
+            [sw addTarget:self action:@selector(hudSwitched:) forControlEvents:UIControlEventValueChanged];
+            c.accessoryView = sw;
         } else {
             c.textLabel.text = @"Tự tắt sau";
             UIButton *b = [UIButton buttonWithType:UIButtonTypeSystem];
@@ -276,6 +284,7 @@ static NSArray *SFModes(void) { return @[ @"manual", @"launch", @"hourly", @"12h
     [c updateFromEngine];
     return c;
 }
+- (void)hudSwitched:(UISwitch *)sw { [[NSUserDefaults standardUserDefaults] setBool:sw.on forKey:@"sf.loadhud"]; }
 - (void)toastSwitched:(UISwitch *)sw { [[SFEngine shared] setToastEnabled:sw.on]; }
 - (void)modeChanged:(UISegmentedControl *)seg { [[SFEngine shared] setAutoMode:SFModes()[(NSUInteger)seg.selectedSegmentIndex]]; }
 - (void)tableView:(UITableView *)tv didSelectRowAtIndexPath:(NSIndexPath *)ip {

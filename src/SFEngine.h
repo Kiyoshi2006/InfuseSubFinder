@@ -9,6 +9,7 @@ void SFToast(NSString *text);
 void SFShowText(NSString *title, NSString *text);
 void SFInstallChapters(void);
 void SFInstallProbe(void);
+void SFInstallLoadHUD(void);
 void SFInstallUI(void);
 BOOL SFInstallSettingsHook(void);
 void SFOpenSettings(id settingsController);   // nut ISF noi + bang cai dat (SFUI.m)  // thong bao nho tren man hinh (main thread tu dispatch)

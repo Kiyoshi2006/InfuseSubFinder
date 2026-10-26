@@ -1054,3 +1054,4 @@ static const void *kSFAttachedKey = &kSFAttachedKey;
 #include "SFUI.inc"
 #include "SFChapters.inc"
 #include "SFProbe.inc"
+#include "SFLoadHUD.inc"
