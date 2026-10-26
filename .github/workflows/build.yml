@@ -24,7 +24,7 @@ jobs:
             -arch arm64 -miphoneos-version-min=14.0 \
             -dynamiclib -fobjc-arc -fblocks -O2 -fvisibility=hidden \
             -Wall -Wno-unused-parameter -Wno-deprecated-declarations \
-            -framework Foundation -framework UIKit \
+            -framework Foundation -framework UIKit -framework CoreGraphics \
             -install_name @rpath/InfuseSubFinder.dylib \
             -Isrc src/Tweak.m src/SFEngine.m src/SFMatch.c \
             -o out/InfuseSubFinder.dylib
