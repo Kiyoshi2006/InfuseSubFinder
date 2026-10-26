@@ -247,16 +247,21 @@ static NSArray *SFModes(void) { return @[ @"manual", @"launch", @"hourly", @"12h
             c.accessoryView = sw;
         } else {
             c.textLabel.text = @"Tự tắt sau";
-            // banh xe cuon nho (nhu 3 nut "10 giay" cua InfusePlus): vuot len xuong de chon 1-10 giay
-            UIPickerView *pk = [[UIPickerView alloc] initWithFrame:CGRectMake(0, 0, 110, 34)];
-            SFSecsPicker *pd = [SFSecsPicker new];
-            pk.dataSource = pd; pk.delegate = pd;
-            objc_setAssociatedObject(pk, "sfpd", pd, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-            pk.backgroundColor = [UIColor colorWithWhite:1 alpha:0.1];
-            pk.layer.cornerRadius = 8;
-            pk.clipsToBounds = YES;
-            [pk selectRow:MAX(0, MIN(9, [e toastSeconds] - 1)) inComponent:0 animated:NO];
-            c.accessoryView = pk;
+            UIButton *b = [UIButton buttonWithType:UIButtonTypeSystem];
+            [b setTitle:[NSString stringWithFormat:@"%ld giây ⌄", (long)[e toastSeconds]] forState:UIControlStateNormal];
+            b.titleLabel.font = [UIFont systemFontOfSize:17 weight:UIFontWeightMedium];
+            b.frame = CGRectMake(0, 0, 100, 34);
+            NSMutableArray *acts = [NSMutableArray array];
+            __weak UIButton *wb = b;
+            for (NSInteger s = 1; s <= 10; s++) {
+                [acts addObject:[UIAction actionWithTitle:[NSString stringWithFormat:@"%ld giây", (long)s] image:nil identifier:nil handler:^(UIAction *a) {
+                    [[SFEngine shared] setToastSeconds:s];
+                    [wb setTitle:[NSString stringWithFormat:@"%ld giây ⌄", (long)s] forState:UIControlStateNormal];
+                }]];
+            }
+            b.menu = [UIMenu menuWithChildren:acts];
+            b.showsMenuAsPrimaryAction = YES;
+            c.accessoryView = b;
         }
         return c;
     }
