@@ -92,7 +92,8 @@ static NSString *SFMB(unsigned long long b) {
 @end
 @implementation SFLoadHUDView
 - (instancetype)init {
-    if ((self = [super initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemChromeMaterialDark]])) {
+    if ((self = [super initWithEffect:nil])) {
+        self.backgroundColor = [UIColor colorWithWhite:0.08 alpha:0.78];
         self.layer.cornerRadius = 14; self.clipsToBounds = YES; self.userInteractionEnabled = NO;
         _l1 = [UILabel new]; _l1.font = [UIFont systemFontOfSize:15 weight:UIFontWeightSemibold]; _l1.textColor = UIColor.whiteColor;
         _l2 = [UILabel new]; _l2.font = [UIFont monospacedDigitSystemFontOfSize:13 weight:UIFontWeightRegular]; _l2.textColor = [UIColor colorWithWhite:1 alpha:0.85];
@@ -125,7 +126,8 @@ static CGFloat SFMonScale(void) { double v = [[NSUserDefaults standardUserDefaul
 @end
 @implementation SFMonView
 - (instancetype)init {
-    if ((self = [super initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemChromeMaterialDark]])) {
+    if ((self = [super initWithEffect:nil])) {
+        self.backgroundColor = [UIColor colorWithWhite:0.08 alpha:0.78];
         self.layer.cornerRadius = 12; self.clipsToBounds = YES;
         _title = [UILabel new]; _title.text = @"Theo dõi phát"; _title.font = [UIFont systemFontOfSize:13 weight:UIFontWeightSemibold]; _title.textColor = UIColor.whiteColor;
         _body = [UILabel new]; _body.numberOfLines = 0;
@@ -189,6 +191,39 @@ static BOOL SFAnimating(CALayer *l, int d) {
     return NO;
 }
 
+
+
+static id SFFindObjOfClass(NSString *cn, NSArray *roots) {
+    Class target = NSClassFromString(cn); if (!target) return nil;
+    NSMutableSet *seen = [NSMutableSet set];
+    NSMutableArray *q = [NSMutableArray array];
+    for (id r in roots) if (r && r != (id)NSNull.null) [q addObject:@[ r, @0 ]];
+    int guard = 0;
+    while (q.count && guard++ < 400) {
+        NSArray *e = q.firstObject; [q removeObjectAtIndex:0];
+        id o = e[0]; int d = [e[1] intValue];
+        NSValue *k = [NSValue valueWithPointer:(__bridge void *)o];
+        if ([seen containsObject:k]) continue; [seen addObject:k];
+        if ([o isKindOfClass:target]) return o;
+        if (d >= 3) continue;
+        NSString *own = NSStringFromClass([o class]);
+        if ([o isKindOfClass:[UIView class]] || [own hasPrefix:@"NS"] || [own hasPrefix:@"__NS"] || [own hasPrefix:@"UI"]) {
+            if ([o isKindOfClass:[NSArray class]]) { int n = 0; for (id x in (NSArray *)o) { if (n++ > 40) break; [q addObject:@[ x, @(d + 1) ]]; } }
+            continue;
+        }
+        for (Class c = [o class]; c && ![NSStringFromClass(c) hasPrefix:@"NS"]; c = class_getSuperclass(c)) {
+            unsigned n = 0; Ivar *iv = class_copyIvarList(c, &n);
+            for (unsigned i = 0; i < n; i++) {
+                const char *ty = ivar_getTypeEncoding(iv[i]);
+                if (!ty || ty[0] != '@') continue;
+                id v = nil; @try { v = object_getIvar(o, iv[i]); } @catch (...) {}
+                if (v) [q addObject:@[ v, @(d + 1) ]];
+            }
+            free(iv);
+        }
+    }
+    return nil;
+}
 
 static void SFHideRewind(UIView *root) {
     static NSArray *labels;
@@ -256,7 +291,7 @@ static void SFLoadHUDTick(void) {
     static unsigned long long lastBytes[SF_LS_MAX]; static NSDate *lastT; static double speed; static int best = -1;
     static __weak UIView *spinner; static SFLoadHUDView *hud; static SFMonView *mon; static int tickN; static NSDate *lastCacheLog; static int cacheLogs;
     static double lastCT = -1; static NSDate *lastAdvance; static int stalls; static BOOL wasStall; static int lastSig = -1;
-    static NSDate *stopSince, *cacheFix, *cacheDraw; static __weak UIView *cacheLine;
+    static NSDate *stopSince, *cacheFix, *cacheDraw; static __weak UIView *cacheLine; static __weak id curItem; static id vdesc; static NSDate *descTried;
     tickN++;
     UIViewController *vc = SFProbeTopVC();
     if (![NSStringFromClass([vc class]) isEqualToString:@"FCVideoViewController"]) {
@@ -264,9 +299,16 @@ static void SFLoadHUDTick(void) {
         if (mon.superview) [mon removeFromSuperview];
         curVC = nil; wasVisible = NO; return;
     }
-    if (vc != curVC) {                                   // phien phat moi
-        curVC = vc; vcStart = [NSDate date]; visStart = nil; wasVisible = NO; speed = 0; best = -1; lastT = nil;
-        lastCT = -1; lastAdvance = nil; stalls = 0; wasStall = NO; lastSig = -1;
+    Class PH0 = NSClassFromString(@"PlayerHelper");
+    id helper0 = PH0 ? ((id (*)(id, SEL))objc_msgSend)(PH0, NSSelectorFromString(@"currentPlayer")) : nil;
+    id item0 = helper0 ? SFObj0(helper0, @"mediaItem") : nil;
+    BOOL newSession = NO;
+    if (vc != curVC) { newSession = YES; curVC = vc; curItem = item0; }
+    else if (item0 && curItem && item0 != curItem) { newSession = YES; curItem = item0; SFLog(@"[load] doi tap trong player -> reset bo dem"); }
+    else if (item0 && !curItem) curItem = item0;
+    if (newSession) {                                   // phien phat moi / doi tap
+        vcStart = [NSDate date]; visStart = nil; wasVisible = NO; speed = 0; best = -1; lastT = nil;
+        lastCT = -1; lastAdvance = nil; stalls = 0; wasStall = NO; lastSig = -1; vdesc = nil; descTried = nil; stopSince = nil;
         for (int i = 0; i < sf_ls_n; i++) { atomic_store(&sf_ls[i].bytes, 0); atomic_store(&sf_ls[i].reads, 0); lastBytes[i] = 0; }
         spinner = nil;
     }
@@ -278,6 +320,10 @@ static void SFLoadHUDTick(void) {
     double dt = lastT ? [now timeIntervalSinceDate:lastT] : 0;
     int top = -1; unsigned long long topB = 0;
     for (int i = 0; i < sf_ls_n; i++) { unsigned long long b = atomic_load(&sf_ls[i].bytes); if (b > topB) { topB = b; top = i; } }
+    for (int i = 0; i < sf_ls_n; i++) {   // uu tien lop cu the (HTTP/SMB/...) neu so byte gan bang lop tong
+        unsigned long long b = atomic_load(&sf_ls[i].bytes);
+        if (top >= 0 && i != top && b * 10 >= topB * 9 && ![SFSourceLabel(sf_ls[i].name) isEqualToString:@"Mạng/nguồn"]) { top = i; topB = b; break; }
+    }
     if (top >= 0 && dt > 0.05) {
         double inst = (topB - lastBytes[top]) / dt;
         if (top != best) { best = top; speed = inst; } else speed = speed * 0.6 + inst * 0.4;
@@ -304,6 +350,26 @@ static void SFLoadHUDTick(void) {
     double elapsed = -[vcStart timeIntervalSinceNow];
     NSString *srcName = top >= 0 ? SFSourceLabel(sf_ls[top].name) : @"—";
 
+
+    // ---- thong tin video/giai ma (FCVideoStreamDescriptor) tim trong do thi doi tuong cua player
+    static int descTries; if (newSession) descTries = 0;
+    if (!vdesc && opened && descTries < 4 && (!descTried || -[descTried timeIntervalSinceNow] > 3)) {
+        descTried = now; descTries++;
+        vdesc = SFFindObjOfClass(@"FCVideoStreamDescriptor", @[ vc, SFObj0(vc, @"player") ?: (id)NSNull.null, SFObj0(vc, @"playbackStrategy") ?: (id)NSNull.null ]);
+        if (vdesc) SFLog(@"[load] tim thay FCVideoStreamDescriptor: %@", [[vdesc description] substringToIndex:MIN((NSUInteger)200, [[vdesc description] length])]);
+    }
+    NSString *vinfo = @"—", *dec = @"—";
+    if (vdesc) {
+        @try {
+            int w = [[vdesc valueForKey:@"width"] intValue], h = [[vdesc valueForKey:@"height"] intValue];
+            double f = [[vdesc valueForKey:@"fps"] doubleValue];
+            BOOL hw = [[vdesc valueForKey:@"shouldUseHWDecoding"] boolValue], slow = [[vdesc valueForKey:@"usesSlowSWCodec"] boolValue];
+            vinfo = [NSString stringWithFormat:@"%dx%d %.2ffps", w, h, f];
+            dec = hw ? @"Phần cứng" : (slow ? @"Phần mềm (codec nặng)" : @"Phần mềm");
+        } @catch (...) {}
+    }
+    id playerObj = SFObj0(vc, @"player");
+    NSString *engine = playerObj ? NSStringFromClass([playerObj class]) : @"—";
 
     // ---- thong ke giai ma cua Infuse (FCPlaybackStatistics)
     id tracker = SFObj0(vc, @"_playbackStatisticsTracker"); if (!tracker) tracker = [vc valueForKey:@"_playbackStatisticsTracker"];
@@ -404,8 +470,8 @@ static void SFLoadHUDTick(void) {
         NSProcessInfo *pi = [NSProcessInfo processInfo];
         NSString *th = @[ @"bình thường", @"hơi ấm", @"nóng", @"rất nóng" ][MAX(0, MIN(3, (int)pi.thermalState))];
         mon.body.text = [NSString stringWithFormat:
-            @"Trạng thái  %@\nVị trí      %@ / %@\nNguồn       %@\nĐã đọc      %@\nTốc độ      %.2f MB/s (TB %.2f)\nĐứng hình   %d lần\nNhiệt máy   %@%@\nGiải mã     %@%@\nFPS         %.1f   Đệm đầy %d",
-            state, SFTimeStr(ct), SFTimeStr(dur), srcName, SFMB(topB), speed / 1048576.0, avg / 1048576.0, stalls, th, pi.lowPowerModeEnabled ? @"\nTiết kiệm pin: BẬT" : @"", ptypes.length ? ptypes : @"—", soft ? @" (phần mềm)" : @"", fps, fullBuf];
+            @"Trạng thái  %@\nVị trí      %@ / %@\nNguồn       %@\nĐã đọc      %@\nTốc độ      %.2f MB/s (TB %.2f)\nĐứng hình   %d lần\nNhiệt máy   %@%@\nVideo       %@\nGiải mã     %@\nTrình phát  %@\nFPS(Infuse) %.1f   Đệm đầy %d",
+            state, SFTimeStr(ct), SFTimeStr(dur), srcName, SFMB(topB), speed / 1048576.0, avg / 1048576.0, stalls, th, pi.lowPowerModeEnabled ? @"\nTiết kiệm pin: BẬT" : @"", vinfo, soft ? @"Phần mềm (đã chuyển)" : dec, engine, fps, fullBuf];
         CGSize s = [mon systemLayoutSizeFittingSize:UILayoutFittingCompressedSize];
         CGPoint c = mon.center; mon.bounds = CGRectMake(0, 0, s.width, s.height); mon.center = c;
         [vc.view bringSubviewToFront:mon];
@@ -421,6 +487,6 @@ void SFInstallLoadHUD(void) {
     dispatch_async(dispatch_get_main_queue(), ^{
         SFInstallLoadHooks();
         SFInstallSpeedFix();
-        [NSTimer scheduledTimerWithTimeInterval:0.25 repeats:YES block:^(NSTimer *t) { @try { SFLoadHUDTick(); } @catch (NSException *e) { SFLog(@"[load] loi: %@", e); } }];
+        [NSTimer scheduledTimerWithTimeInterval:0.5 repeats:YES block:^(NSTimer *t) { if ([UIApplication sharedApplication].applicationState != UIApplicationStateActive) return; @try { SFLoadHUDTick(); } @catch (NSException *e) { SFLog(@"[load] loi: %@", e); } }];
     });
 }
