@@ -257,6 +257,7 @@ static void SFInstallFrameHooks(void) {
 
 // ---- thong ke cuoi phien cua Infuse (FCVVCPlaybackStatisticsTracker)
 static _Atomic int sf_liveFull = 0, sf_liveSoft = 0;
+static NSString *sf_lastEngine; static double sf_lastAvg;
 static void (*sf_orig_finish)(id, SEL, id);
 static void (*sf_orig_markfull)(id, SEL);
 static void (*sf_orig_markfb)(id, SEL);
@@ -279,7 +280,7 @@ static void sf_hooked_finish(id self, SEL c, id player) {
         NSString *types = [[[st valueForKey:@"usedPlayerTypes"] allObjects] componentsJoinedByString:@","] ?: @"";
         id iss = SFObj0(st, @"inputStreamStats"); double mbps = 0;
         if (iss) { @try { mbps = [[iss valueForKey:@"averageReadingSpeedMbps"] doubleValue]; } @catch (...) {} }
-        NSString *r = [NSString stringWithFormat:@"%.0fs · %.1f fps · %@ · đệm đầy %d · nguồn %.1f Mbps", pt, fps, soft ? @"giải mã phần mềm" : (types.length ? types : @"phần cứng"), MAX(fb, atomic_load(&sf_liveFull)), mbps];
+        NSString *r = [NSString stringWithFormat:@"%.0fs · kịp giờ %.0f%% · %@ · đệm đầy %d · nguồn %.2f MB/s", pt, fps * 100.0, soft ? @"giải mã phần mềm" : (sf_lastEngine.length ? sf_lastEngine : types), MAX(fb, atomic_load(&sf_liveFull)), sf_lastAvg / 1048576.0];
         SFLog(@"[report] %@ | %@", r, st);
         [[NSUserDefaults standardUserDefaults] setObject:r forKey:@"sf.lastreport"];
         if (pt > 5 && [[NSUserDefaults standardUserDefaults] boolForKey:@"sf.monbtn"])
@@ -334,11 +335,11 @@ static BOOL SFIs2x(id pc) {
     return *((uint8_t *)(__bridge void *)pc + sf_2xOff) != 0;
 }
 static void sf_hooked_setrate(id self, SEL _cmd, float r) {
-    Class UDc = NSClassFromString(@"INFUserDefaults");
-    BOOL longTap = UDc ? ((BOOL (*)(id, SEL, id))objc_msgSend)(UDc, NSSelectorFromString(@"boolForKey:"), @"longTapToSpeed") : YES;
+    BOOL no2x = [[NSUserDefaults standardUserDefaults] boolForKey:@"sf.no2x"];
+    if (no2x && r == 2.0f && SFIs2x(self)) { SFLog(@"[2x] chan (co 2x truoc khi dat toc do), giu %.2fx", sf_normalRate); return; }
     if (!SFIs2x(self) && r != 2.0f) sf_normalRate = r;
     sf_orig_setrate(self, _cmd, r);
-    if (longTap || r != 2.0f) return;
+    if (!no2x || r != 2.0f) return;
     __weak id wself = self;
     dispatch_async(dispatch_get_main_queue(), ^{
         id s = wself; if (!s) return;
@@ -458,6 +459,7 @@ static void SFLoadHUDTick(void) {
     }
     id playerObj = SFObj0(vc, @"player");
     NSString *engine = playerObj ? NSStringFromClass([playerObj class]) : @"—";
+    sf_lastEngine = engine; if (elapsed > 1 && topB > 0) sf_lastAvg = topB / elapsed;
 
     // ---- thong ke giai ma cua Infuse (FCPlaybackStatistics)
     id tracker = SFObj0(vc, @"_playbackStatisticsTracker"); if (!tracker) tracker = [vc valueForKey:@"_playbackStatisticsTracker"];

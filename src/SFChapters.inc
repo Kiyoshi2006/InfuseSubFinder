@@ -543,8 +543,60 @@ static id sf_hooked_ics_init(id self, SEL _cmd, NSInteger style) {
 }
 
 // InfusePlus nap sau/truoc dylib nay khong ro -> thu lai den khi co lop
+
+// ---- trang "Trinh phat" cua InfusePlus: them cong tac chan "giu de tang toc 2x" goc cua Infuse (duoi dong Tang toc phat lai)
+static id (*sf_orig_ps_init)(id, SEL, NSInteger);
+static id sf_hooked_ps_init(id self, SEL _cmd, NSInteger style) {
+    id me = sf_orig_ps_init(self, _cmd, style);
+    @try {
+        NSArray *sp = [me valueForKey:@"_speed"];
+        if ([sp isKindOfClass:[NSArray class]]) {
+            NSMutableArray *n = [NSMutableArray array]; BOOL added = NO;
+            for (id row in sp) {
+                [n addObject:row];
+                if (!added && [row isKindOfClass:[NSDictionary class]] && [row[@"key"] isEqualToString:@"longTapToSpeed"]) {
+                    NSMutableDictionary *d = [row mutableCopy];
+                    d[@"type"] = @"sfswitch"; d[@"id"] = @"sfno2x"; d[@"key"] = @"sf.no2x"; d[@"sfswitchkey"] = @"sf.no2x";
+                    d[@"title"] = @"Disable stock hold-to-2x";
+                    d[@"desc"] = @"Chặn giữ màn hình tăng tốc 2x mặc định của Infuse";
+                    d[@"image"] = @"hand.tap";
+                    [d removeObjectForKey:@"canHide"];
+                    [n addObject:d]; added = YES;
+                }
+            }
+            if (added) {
+                NSArray *old = [me valueForKey:@"_sections"]; NSMutableArray *ns = [NSMutableArray array];
+                for (id x in old) [ns addObject:(x == sp ? [n copy] : x)];
+                [me setValue:[n copy] forKey:@"_speed"];
+                [me setValue:ns forKey:@"_sections"];
+            }
+        }
+    } @catch (NSException *e) { SFLog(@"[chap] loi chen dong trinh phat: %@", e); }
+    return me;
+}
+static UITableViewCell *(*sf_orig_ps_cell)(id, SEL, UITableView *, NSIndexPath *);
+static UITableViewCell *sf_hooked_ps_cell(id self, SEL _cmd, UITableView *tv, NSIndexPath *ip) {
+    UITableViewCell *cell = sf_orig_ps_cell(self, _cmd, tv, ip);
+    @try {
+        NSArray *secs = [self valueForKey:@"_sections"];
+        id row = (ip.section < (NSInteger)secs.count && ip.row < (NSInteger)[secs[ip.section] count]) ? secs[ip.section][ip.row] : nil;
+        NSString *swKey = [row isKindOfClass:[NSDictionary class]] ? row[@"sfswitchkey"] : nil;
+        if (swKey) {
+            UISwitch *sw = [[UISwitch alloc] init];
+            sw.on = [[NSUserDefaults standardUserDefaults] boolForKey:swKey];
+            sw.onTintColor = tv.tintColor;
+            objc_setAssociatedObject(sw, kSFSlotKey, swKey, OBJC_ASSOCIATION_COPY_NONATOMIC);
+            [sw addTarget:[SFChapField shared] action:@selector(toggled:) forControlEvents:UIControlEventValueChanged];
+            sw.tag = 0x5F1;
+            cell.accessoryView = sw;
+            cell.selectionStyle = UITableViewCellSelectionStyleNone;
+        } else if (cell.accessoryView.tag == 0x5F1) cell.accessoryView = nil;
+    } @catch (NSException *e) {}
+    return cell;
+}
+
 static BOOL SFTryInstallChapters(void) {
-    static BOOL h1, h2, h3;
+    static BOOL h1, h2, h3, h4;
     if (!h1) {
         Class c = NSClassFromString(@"INFPIntroController");
         Method m = c ? class_getInstanceMethod(c, NSSelectorFromString(@"skipIntroIfNeeded:withAsset:")) : NULL;
@@ -574,6 +626,16 @@ static BOOL SFTryInstallChapters(void) {
             h3 = YES; SFLog(@"[chap] da hook PlayerHelper skipIntroIfNeeded: + keyForAsset: (video chua khop metadata)");
         }
     }
+    if (!h4) {
+        Class pc = NSClassFromString(@"PlayerSettings");
+        Method p1 = pc ? class_getInstanceMethod(pc, @selector(initWithStyle:)) : NULL;
+        Method p2 = pc ? class_getInstanceMethod(pc, @selector(tableView:cellForRowAtIndexPath:)) : NULL;
+        if (p1 && p2) {
+            sf_orig_ps_init = (id (*)(id, SEL, NSInteger))method_getImplementation(p1); method_setImplementation(p1, (IMP)sf_hooked_ps_init);
+            sf_orig_ps_cell = (UITableViewCell *(*)(id, SEL, UITableView *, NSIndexPath *))method_getImplementation(p2); method_setImplementation(p2, (IMP)sf_hooked_ps_cell);
+            h4 = YES; SFLog(@"[chap] da hook trang Trinh phat cua InfusePlus");
+        }
+    }
     if (!h2) {
         Class c = NSClassFromString(@"IntroSettings");
         Method m1 = c ? class_getInstanceMethod(c, @selector(initWithStyle:)) : NULL;
@@ -584,7 +646,7 @@ static BOOL SFTryInstallChapters(void) {
             h2 = YES; SFLog(@"[chap] da hook trang Intros cua InfusePlus");
         }
     }
-    return h1 && h2 && h3;
+    return h1 && h2 && h3 && h4;
 }
 
 void SFInstallChapters(void) {
