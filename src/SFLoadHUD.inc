@@ -336,6 +336,7 @@ static BOOL SFIs2x(id pc) {
 }
 static void sf_hooked_setrate(id self, SEL _cmd, float r) {
     BOOL no2x = [[NSUserDefaults standardUserDefaults] boolForKey:@"sf.no2x"];
+    if (r != 1.0f) { NSArray *cs = [NSThread callStackSymbols]; SFLog(@"[2x] setPlaybackRate:%.2f flag=%d no2x=%d off=%ld stack=%@", r, SFIs2x(self), no2x, (long)sf_2xOff, [[cs subarrayWithRange:NSMakeRange(1, MIN((NSUInteger)6, cs.count - 1))] componentsJoinedByString:@" | "]); }
     if (no2x && r == 2.0f && SFIs2x(self)) { SFLog(@"[2x] chan (co 2x truoc khi dat toc do), giu %.2fx", sf_normalRate); return; }
     if (!SFIs2x(self) && r != 2.0f) sf_normalRate = r;
     sf_orig_setrate(self, _cmd, r);
