@@ -45,6 +45,10 @@ void SFOpenSettings(id settingsController);   // nut ISF noi + bang cai dat (SFU
 - (void)setPath:(NSString *)path source:(NSString *)sourceId enabled:(BOOL)on;
 - (NSString *)autoMode;                      // manual | launch | hourly | 12h
 - (void)setAutoMode:(NSString *)mode;
+- (BOOL)toastEnabled;                     // thong bao "gan N sub" khi vao video
+- (void)setToastEnabled:(BOOL)on;
+- (NSInteger)toastSeconds;                // tu tat sau N giay
+- (void)setToastSeconds:(NSInteger)s;
 - (NSInteger)totalSubs;
 - (BOOL)isLocalSource:(NSString *)sourceId;
 - (NSDictionary *)reconcileListing:(NSDictionary *)listing folder:(id)folderItem source:(NSString *)sourceId apply:(BOOL)apply;

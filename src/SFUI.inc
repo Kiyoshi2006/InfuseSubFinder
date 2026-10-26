@@ -185,11 +185,11 @@ static NSArray *SFModes(void) { return @[ @"manual", @"launch", @"hourly", @"12h
 @implementation SFSettingsVC
 - (void)viewDidLoad { [super viewDidLoad]; self.title = @"Tìm sub"; self.sources = [[SFEngine shared] sourceList]; }
 - (NSUInteger)dataSignature { self.sources = [[SFEngine shared] sourceList]; return [self.sources description].hash ^ (NSUInteger)[[SFEngine shared] runningCount]; }
-- (NSInteger)numberOfSectionsInTableView:(UITableView *)tv { return 3; }
-- (NSInteger)tableView:(UITableView *)tv numberOfRowsInSection:(NSInteger)s { return s == 0 ? 2 : (s == 1 ? 1 : (NSInteger)self.sources.count); }
-- (NSString *)tableView:(UITableView *)tv titleForHeaderInSection:(NSInteger)s { return s == 1 ? @"TỰ ĐỘNG LÀM MỚI" : (s == 2 ? @"NGUỒN (BẤM VÀO ĐỂ XEM THƯ MỤC)" : nil); }
+- (NSInteger)numberOfSectionsInTableView:(UITableView *)tv { return 4; }
+- (NSInteger)tableView:(UITableView *)tv numberOfRowsInSection:(NSInteger)s { return s == 0 ? 2 : (s == 1 ? 1 : (s == 2 ? 2 : (NSInteger)self.sources.count)); }
+- (NSString *)tableView:(UITableView *)tv titleForHeaderInSection:(NSInteger)s { return s == 1 ? @"TỰ ĐỘNG LÀM MỚI" : (s == 2 ? @"THÔNG BÁO" : (s == 3 ? @"NGUỒN (BẤM VÀO ĐỂ XEM THƯ MỤC)" : nil)); }
 - (NSString *)tableView:(UITableView *)tv titleForFooterInSection:(NSInteger)s {
-    return s == 2 ? @"Sub thêm/xóa trong thư mục tự cập nhật vào chỉ mục (nguồn iPhone cập nhật nền mỗi vài giây)." : nil;
+    return s == 3 ? @"Sub thêm/xóa trong thư mục tự cập nhật vào chỉ mục (nguồn iPhone cập nhật nền mỗi vài giây)." : nil;
 }
 - (UITableViewCell *)tableView:(UITableView *)tv cellForRowAtIndexPath:(NSIndexPath *)ip {
     SFEngine *e = [SFEngine shared];
@@ -218,6 +218,45 @@ static NSArray *SFModes(void) { return @[ @"manual", @"launch", @"hourly", @"12h
         ]];
         return c;
     }
+    if (ip.section == 2) {
+        UITableViewCell *c = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:nil];
+        c.backgroundColor = SFCellBG();
+        c.selectionStyle = UITableViewCellSelectionStyleNone;
+        if (ip.row == 0) {
+            c.textLabel.text = @"Báo khi gắn sub vào video";
+            UISwitch *sw = [[UISwitch alloc] init];
+            sw.on = [e toastEnabled];
+            [sw addTarget:self action:@selector(toastSwitched:) forControlEvents:UIControlEventValueChanged];
+            c.accessoryView = sw;
+        } else {
+            c.textLabel.text = @"Tự tắt sau";
+            // nut dang "10 giay" nhu InfusePlus: bam ra danh sach 1-10 giay de chon
+            UIButton *b = [UIButton buttonWithType:UIButtonTypeSystem];
+            void (^refresh)(UIButton *) = ^(UIButton *bt) {
+                [bt setTitle:[NSString stringWithFormat:@"%ld giây", (long)[[SFEngine shared] toastSeconds]] forState:UIControlStateNormal];
+                [bt sizeToFit];
+                CGRect f = bt.frame; f.size.width += 28; f.size.height = 32; bt.frame = f;
+            };
+            b.titleLabel.font = [UIFont systemFontOfSize:17];
+            b.backgroundColor = [UIColor colorWithWhite:1 alpha:0.1];
+            b.layer.cornerRadius = 8;
+            __weak UIButton *wb = b;
+            NSMutableArray *acts = [NSMutableArray array];
+            for (NSInteger n = 1; n <= 10; n++) {
+                UIAction *a = [UIAction actionWithTitle:[NSString stringWithFormat:@"%ld giây", (long)n] image:nil identifier:nil handler:^(UIAction *act) {
+                    [[SFEngine shared] setToastSeconds:n];
+                    UIButton *bb = wb; if (bb) refresh(bb);
+                }];
+                a.state = ([e toastSeconds] == n) ? UIMenuElementStateOn : UIMenuElementStateOff;
+                [acts addObject:a];
+            }
+            b.menu = [UIMenu menuWithTitle:@"" children:acts];
+            b.showsMenuAsPrimaryAction = YES;
+            refresh(b);
+            c.accessoryView = b;
+        }
+        return c;
+    }
     NSDictionary *r = self.sources[(NSUInteger)ip.row];
     SFRowCell *c = [[SFRowCell alloc] init];
     c.sid = r[@"id"]; c.path = nil; c.key = r[@"id"];
@@ -229,12 +268,13 @@ static NSArray *SFModes(void) { return @[ @"manual", @"launch", @"hourly", @"12h
     [c updateFromEngine];
     return c;
 }
+- (void)toastSwitched:(UISwitch *)sw { [[SFEngine shared] setToastEnabled:sw.on]; }
 - (void)modeChanged:(UISegmentedControl *)seg { [[SFEngine shared] setAutoMode:SFModes()[(NSUInteger)seg.selectedSegmentIndex]]; }
 - (void)tableView:(UITableView *)tv didSelectRowAtIndexPath:(NSIndexPath *)ip {
     [tv deselectRowAtIndexPath:ip animated:YES];
     SFEngine *e = [SFEngine shared];
     if (ip.section == 0 && ip.row == 1) { if ([e isCrawling]) [e cancelAll]; else [e refreshAll]; self.sig = 0; return; }
-    if (ip.section == 2) {
+    if (ip.section == 3) {
         NSDictionary *r = self.sources[(NSUInteger)ip.row];
         [self.navigationController pushViewController:[[SFFolderVC alloc] initWithSource:r[@"id"] item:nil name:r[@"name"]] animated:YES];
     }

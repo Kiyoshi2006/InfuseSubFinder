@@ -125,7 +125,7 @@ void SFToast(NSString *text) {
             [l.widthAnchor constraintLessThanOrEqualToAnchor:host.widthAnchor constant:-32],
         ]];
         [UIView animateWithDuration:0.2 animations:^{ l.alpha = 1; }];
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(6 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)([[SFEngine shared] toastSeconds] * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             [UIView animateWithDuration:0.4 animations:^{ l.alpha = 0; } completion:^(BOOL f) { [l removeFromSuperview]; }];
         });
     });
@@ -725,6 +725,10 @@ static BOOL SFPathUnder(NSString *p, NSString *base) {
     }
     [self saveSettings];
 }
+- (BOOL)toastEnabled { id v = self.settings[@"toast"]; return v ? [v boolValue] : [self boolCfg:@"showToast"]; }
+- (void)setToastEnabled:(BOOL)on { @synchronized(self) { self.settings[@"toast"] = @(on); } [self saveSettings]; }
+- (NSInteger)toastSeconds { NSInteger v = [self.settings[@"toastSecs"] integerValue]; return v > 0 ? v : 6; }
+- (void)setToastSeconds:(NSInteger)s { @synchronized(self) { self.settings[@"toastSecs"] = @(s); } [self saveSettings]; }
 - (void)setAutoMode:(NSString *)mode {
     @synchronized(self) { self.settings[@"auto"] = mode; }
     [self saveSettings];
@@ -1038,7 +1042,7 @@ static const void *kSFAttachedKey = &kSFAttachedKey;
     }
     SFLog(@"[related] '%@': %lu ung vien, gan %lu sub", vName, (unsigned long)cands.count, (unsigned long)added.count);
     if (added.count == 0) return orig;
-    if ([self boolCfg:@"showToast"]) SFToast([NSString stringWithFormat:@"ISF: gắn %lu sub cho '%@'", (unsigned long)added.count, vName]);
+    if ([self toastEnabled]) SFToast([NSString stringWithFormat:@"ISF: gắn %lu sub cho '%@'", (unsigned long)added.count, vName]);
     NSMutableArray *out = [NSMutableArray arrayWithArray:orig ?: @[]];
     [out addObjectsFromArray:added];
     return out;
