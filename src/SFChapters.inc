@@ -262,8 +262,67 @@ static void sf_hooked_handle(id self, SEL _cmd, id seg, double t) {
 // Video chua khop metadata: PlayerHelper bo qua het -> tu goi controller voi asset gia.
 static void (*sf_orig_ph_skip)(id, SEL, double);
 static id (*sf_orig_keyfor)(id, SEL, id);
+// ---- nut chuyen chuong (khong phu thuoc mang/metadata): Prev / Next canh nut (i)
+static NSHashTable *sf_navBtns;
+static NSInteger SFNavMode(void) { return [[NSUserDefaults standardUserDefaults] integerForKey:@"sf.chapnav"]; }   // 0 tat, 1 lui, 2 tien, 3 ca hai
+static void SFNavGo(BOOL forward) {
+    id helper = nil;
+    NSArray *chs = SFCurrentChapters(&helper);
+    if (!helper || chs.count < 1) return;
+    double t = SFD(helper, @"currentTime"), target = -1;
+    if (forward) {
+        for (id ch in chs) { double s = SFD(ch, @"startTime"); if (s > t + 0.8) { target = s; break; } }
+        if (target < 0) return;
+    } else {
+        for (NSInteger i = (NSInteger)chs.count - 1; i >= 0; i--) { double s = SFD(chs[(NSUInteger)i], @"startTime"); if (s < t - 3.0) { target = s; break; } }
+        if (target < 0) target = 0;
+    }
+    ((void (*)(id, SEL, double))objc_msgSend)(helper, NSSelectorFromString(@"skipToTime:"), target);
+}
+static void SFNavRefresh(void) {
+    if (!sf_navBtns.count) return;
+    NSArray *chs = SFCurrentChapters(NULL);
+    BOOL has = chs.count > 1;
+    for (UIButton *b in sf_navBtns.allObjects) b.hidden = !has;
+}
+static id (*sf_orig_addintro)(id, SEL, id);
+static id sf_hooked_addintro(id self, SEL _cmd, id stack) {
+    id r = sf_orig_addintro(self, _cmd, stack);
+    @try {
+        NSInteger mode = SFNavMode();
+        UIStackView *st = [stack isKindOfClass:[UIStackView class]] ? stack : nil;
+        if (!st || mode <= 0) return r;
+        for (UIView *v in st.arrangedSubviews) if ([v.accessibilityIdentifier hasPrefix:@"sf_chap_"]) return r;
+        UIView *intro = nil; NSUInteger idx = NSNotFound;
+        NSArray *subs = st.arrangedSubviews;
+        for (NSUInteger i = 0; i < subs.count; i++) if ([[subs[i] accessibilityIdentifier] isEqualToString:@"infp_intro_button"]) { intro = subs[i]; idx = i; break; }
+        BOOL legacy = [[self valueForKey:@"_isLegacy"] boolValue];
+        if (idx == NSNotFound) idx = legacy ? subs.count : MIN((NSUInteger)1, subs.count);
+        if (!sf_navBtns) sf_navBtns = [NSHashTable weakObjectsHashTable];
+        NSMutableArray *btns = [NSMutableArray array];
+        for (int k = 0; k < 2; k++) {
+            BOOL fwd = (k == 1);
+            if (!(fwd ? (mode & 2) : (mode & 1))) continue;
+            UIButton *b = [UIButton buttonWithType:UIButtonTypeSystem];
+            b.accessibilityIdentifier = fwd ? @"sf_chap_next" : @"sf_chap_prev";
+            b.translatesAutoresizingMaskIntoConstraints = NO;
+            b.tintColor = [UIColor colorWithWhite:1 alpha:legacy ? 1.0 : 0.9];
+            [b setImage:[UIImage systemImageNamed:fwd ? @"forward.end" : @"backward.end"] forState:UIControlStateNormal];
+            [b.widthAnchor constraintEqualToConstant:24].active = YES;
+            [b.heightAnchor constraintEqualToConstant:24].active = YES;
+            [b addAction:[UIAction actionWithHandler:^(UIAction *a) { SFNavGo(fwd); }] forControlEvents:UIControlEventTouchUpInside];
+            b.hidden = SFCurrentChapters(NULL).count <= 1;
+            [sf_navBtns addObject:b];
+            [btns addObject:b];
+        }
+        for (UIButton *b in btns) { [st insertArrangedSubview:b atIndex:MIN(idx, st.arrangedSubviews.count)]; idx++; }
+    } @catch (NSException *e) { SFLog(@"[chap] loi nut chuong: %@", e); }
+    return r;
+}
+
 static void sf_hooked_ph_skip(id self, SEL _cmd, double t) {
     sf_lastHelper = self;
+    { static int nt; if ((nt++ % 20) == 0) SFNavRefresh(); }
     {   // doi tap (bam "tap tiep theo" / het video) -> bo nut skip cu + reset trang thai
         id mi0 = SFObj0(self, @"mediaItem");
         if (mi0 != sf_lastItem) {
@@ -347,6 +406,33 @@ static UITableViewCell *sf_hooked_ics_cell(id self, SEL _cmd, UITableView *tv, N
             sw.tag = 0x5F1;
             cell.accessoryView = sw;
             cell.selectionStyle = UITableViewCellSelectionStyleNone;
+        } else if ([row isKindOfClass:[NSDictionary class]] && [row[@"sfnav"] boolValue]) {
+            UIButton *b = [UIButton buttonWithType:UIButtonTypeSystem];
+            NSArray *names = @[ @"Off ", @"Previous ", @"Next ", @"Previous + Next " ];
+            void (^refresh)(UIButton *) = ^(UIButton *btn) {
+                [btn setTitle:names[MAX(0, MIN(3, SFNavMode()))] forState:UIControlStateNormal];
+                [btn setImage:[UIImage systemImageNamed:@"chevron.up.chevron.down"] forState:UIControlStateNormal];
+                btn.semanticContentAttribute = UISemanticContentAttributeForceRightToLeft;
+                btn.titleLabel.font = [UIFont systemFontOfSize:17];
+                [btn sizeToFit];
+            };
+            __weak UIButton *wb = b;
+            NSArray *titles = @[ @"Off", @"Previous chapter", @"Next chapter", @"Previous + Next" ];
+            NSMutableArray *acts = [NSMutableArray array];
+            for (NSInteger i = 0; i < 4; i++) {
+                UIAction *a = [UIAction actionWithTitle:titles[i] image:nil identifier:nil handler:^(UIAction *act) {
+                    [[NSUserDefaults standardUserDefaults] setInteger:i forKey:@"sf.chapnav"];
+                    UIButton *bb = wb; if (bb) refresh(bb);
+                }];
+                a.state = (SFNavMode() == i) ? UIMenuElementStateOn : UIMenuElementStateOff;
+                [acts addObject:a];
+            }
+            b.tag = 0x5F1;
+            b.menu = [UIMenu menuWithTitle:@"" children:acts];
+            b.showsMenuAsPrimaryAction = YES;
+            refresh(b);
+            cell.accessoryView = b;
+            cell.selectionStyle = UITableViewCellSelectionStyleNone;
         } else if (isPrio) {
             UIButton *b = [UIButton buttonWithType:UIButtonTypeSystem];
             void (^refresh)(UIButton *) = ^(UIButton *btn) {
@@ -420,6 +506,8 @@ static id sf_hooked_ics_init(id self, SEL _cmd, NSInteger style) {
                 nm = [NSMutableArray array];
                 for (id row in main) {
                     [nm addObject:row];
+                    if ([row isKindOfClass:[NSDictionary class]] && [row[@"key"] isEqualToString:@"skipIntrosOverlay"])
+                        [nm addObject:@{ @"type": @"sfnav", @"title": @"Chapter Buttons", @"id": @"sfnav", @"style": @0, @"image": @"forward.end", @"sfnav": @YES }];
                     if ([row isKindOfClass:[NSDictionary class]] && [row[@"key"] isEqualToString:@"skipAlertDuration"])
                     {
                         [nm addObject:@{ @"type": @"sfswitch", @"title": @"Skip Alert: hold until segment ends", @"id": @"sfswitch", @"style": @0, @"image": @"timer", @"sfswitchkey": @"sf.skipinf" }];
@@ -457,6 +545,9 @@ static BOOL SFTryInstallChapters(void) {
             Class TV = NSClassFromString(@"ToastView");
             Method mt = TV ? class_getInstanceMethod(TV, NSSelectorFromString(@"showProgressiveToastWithText:duration:actionTitle:actionCompletion:")) : NULL;
             if (mt) { sf_orig_toast = (void (*)(id, SEL, id, double, id, id))method_getImplementation(mt); method_setImplementation(mt, (IMP)sf_hooked_toast); }
+            Class MSM = NSClassFromString(@"MenuStackManager");
+            Method ma = MSM ? class_getInstanceMethod(MSM, NSSelectorFromString(@"addIntroButtonToStack:")) : NULL;
+            if (ma) { sf_orig_addintro = (id (*)(id, SEL, id))method_getImplementation(ma); method_setImplementation(ma, (IMP)sf_hooked_addintro); }
             h1 = YES; SFLog(@"[chap] da hook INFPIntroController skipIntroIfNeeded:withAsset: + handleSegment:");
         }
     }
