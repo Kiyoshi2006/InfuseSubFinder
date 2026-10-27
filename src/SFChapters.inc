@@ -182,13 +182,7 @@ static double sf_heldStart, sf_heldEnd;
 static NSString *sf_heldSegId;
 static NSDate *sf_heldShownAt;
 static void (*sf_orig_toast)(id, SEL, id, double, id, id);
-// Toast skip hay de len tieu de/nut khi thanh dieu khien dang hien -> day toast len tren thanh tien trinh.
-static UIView *SFFindViewByClass(UIView *v, const char *cn, int depth) {
-    if (!v || depth > 14) return nil;
-    if (strcmp(class_getName(object_getClass(v)), cn) == 0) return v;
-    for (UIView *s in v.subviews) { UIView *r = SFFindViewByClass(s, cn, depth + 1); if (r) return r; }
-    return nil;
-}
+// Tim "vien thuoc" cua toast + kiem tra dang hien that (dung de chan toast Skip trung)
 static UIView *SFFindPill(UIView *v, int depth) {
     if (!v || depth > 6) return nil;
     if (v.layer.cornerRadius >= 12 && v.bounds.size.height < 150 && v.bounds.size.width > 120) return v;
@@ -199,32 +193,8 @@ static BOOL SFViewReallyVisible(UIView *v) {
     for (UIView *p = v; p; p = p.superview) if (p.hidden || p.alpha < 0.05) return NO;
     return v.window != nil;
 }
-static void SFFixToastPos(void) {
-    UIView *t = sf_heldToast;
-    if (![t isKindOfClass:[UIView class]] || !t.window) return;
-    UIView *bar = SFFindViewByClass(t.window, "FCProgressBarCacheLineView", 0);
-    if (!bar || !SFViewReallyVisible(bar)) { if (!CGAffineTransformIsIdentity(t.transform)) t.transform = CGAffineTransformIdentity; return; }
-    UIView *pill = t.bounds.size.height < 150 ? t : (SFFindPill(t, 0) ?: t);
-    CGAffineTransform keep = t.transform; t.transform = CGAffineTransformIdentity;
-    CGRect pr = [pill convertRect:pill.bounds toView:t.window];
-    CGRect br = [bar convertRect:bar.bounds toView:t.window];
-    CGFloat limit = br.origin.y - 72;            // chua cho cho tieu de 2 dong + hang nut
-    CGFloat over = CGRectGetMaxY(pr) - limit;
-    t.transform = over > 1 ? CGAffineTransformMakeTranslation(0, -over) : CGAffineTransformIdentity;
-    (void)keep;
-}
-static NSTimer *sf_toastFixTimer;
 static NSHashTable *sf_toasts;
 static __weak id sf_toastItem;
-static void SFKillOtherToasts(UIView *v, id keep, int depth) {
-    if (!v || depth > 14) return;
-    if (v != keep && strcmp(class_getName(object_getClass(v)), "ToastView") == 0 || (v != keep && [NSStringFromClass(object_getClass(v)) hasSuffix:@".ToastView"])) {
-        SEL h = NSSelectorFromString(@"hideImmediately");
-        if ([v respondsToSelector:h]) ((void (*)(id, SEL))objc_msgSend)(v, h);
-        return;
-    }
-    for (UIView *s in [v.subviews copy]) SFKillOtherToasts(s, keep, depth + 1);
-}
 static void sf_hooked_toast(id self, SEL _cmd, id text, double dur, id title, id block) {
     id old = sf_heldToast;
     if (sf_inAsk && old && old != self && [old respondsToSelector:NSSelectorFromString(@"hideImmediately")])
@@ -240,9 +210,6 @@ static void sf_hooked_toast(id self, SEL _cmd, id text, double dur, id title, id
     }
     if (sf_inAsk) {
         sf_heldToast = self;
-        UIView *tv = [self isKindOfClass:[UIView class]] ? self : nil;
-        UIWindow *w = tv.window;
-        dispatch_async(dispatch_get_main_queue(), ^{ if (w) SFKillOtherToasts(w, self, 0); });
     }
 }
 static void SFHideHeldToast(void) {
@@ -331,6 +298,7 @@ static void sf_hooked_handle(id self, SEL _cmd, id seg, double t) {
         NSString *ident = SFStr0(seg, @"identifier");
         if (UD && ident.length) {
             long mode = ((long (*)(id, SEL, id))objc_msgSend)(UD, NSSelectorFromString(@"intForKey:"), ident);
+            { static int nh; if (nh++ < 60) SFLog(@"[handle] %@ che do=%ld t=%.1f doan=%.1f-%.1f", ident, mode, t, SFD(seg, @"start"), SFD(seg, @"end")); }
             if (mode == 2) { ((void (*)(id, SEL, id))objc_msgSend)(self, NSSelectorFromString(@"autoSkip:"), seg); return; }
             if (mode == 3) {
                 if (sf_orig_floatForKey && [[NSUserDefaults standardUserDefaults] boolForKey:@"sf.skipinf"]) {
