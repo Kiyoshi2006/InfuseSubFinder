@@ -281,11 +281,47 @@ static void SFReshowTick(id ctl, double t, id asset) {
     }
 }
 
+// "Giu den het doan": dang o trong doan Ask (nguoi dung chua bam Skip) ma nut skip khong con tren man hinh -> hien lai.
+// (Nut co the bi InfusePlus/Infuse tat khi player lui keyframe hoac doi man hinh.)
+static void SFEnsureToast(id ctl, double t, id asset) {
+    NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
+    if (![ud boolForKey:@"sf.skipinf"]) return;
+    Class UD = NSClassFromString(@"INFUserDefaults");
+    if (!UD || !((BOOL (*)(id, SEL, id))objc_msgSend)(UD, NSSelectorFromString(@"boolForKey:"), @"skipIntros")) return;
+    if (sf_heldToast && [sf_heldToast isKindOfClass:[UIView class]] && SFViewReallyVisible(sf_heldToast)) return;
+    if (sf_heldShownAt && -[sf_heldShownAt timeIntervalSinceNow] < 3.0) return;           // vua tao / dang hien dan
+    Class MgrC = NSClassFromString(@"INFPIntroManager");
+    id mgr = MgrC ? ((id (*)(id, SEL))objc_msgSend)(MgrC, NSSelectorFromString(@"sharedManager")) : nil;
+    id intro = mgr ? ((id (*)(id, SEL, id))objc_msgSend)(mgr, NSSelectorFromString(@"introForAsset:"), asset) : nil;
+    NSArray *segs = intro ? SFObj0(intro, @"segments") : nil;
+    if (![segs isKindOfClass:[NSArray class]]) return;
+    static NSMutableDictionary *tries;
+    if (!tries) tries = [NSMutableDictionary dictionary];
+    for (id seg in segs) {
+        double st = SFD(seg, @"start");
+        double en = ((double (*)(id, SEL, id))objc_msgSend)(ctl, NSSelectorFromString(@"effectiveEndForSegment:"), seg);
+        if (!(t >= st && t < en - 1.0)) continue;
+        if (SFRecentPress() && fabs(sf_userSkipTo - en) < 0.5) continue;                    // doan nguoi dung vua bam Skip
+        NSString *ident = SFStr0(seg, @"identifier");
+        if (!ident.length) continue;
+        long mode = ((long (*)(id, SEL, id))objc_msgSend)(UD, NSSelectorFromString(@"intForKey:"), ident);
+        if (mode != 3) continue;
+        NSString *key = [NSString stringWithFormat:@"%@|%.1f|%p", ident, st, sf_lastItem];
+        int n = [tries[key] intValue];
+        if (n >= 3) continue;                                                              // toi da 3 lan bu cho moi doan
+        tries[key] = @(n + 1);
+        SFLog(@"[toast] bu nut skip (%@ t=%.1f lan %d)", ident, t, n + 1);
+        ((void (*)(id, SEL, id, double))objc_msgSend)(ctl, NSSelectorFromString(@"handleSegment:currentTime:"), seg, t);
+        return;
+    }
+}
+
 static void sf_hooked_skip(id self, SEL _cmd, double t, id asset) {
     @try { SFApplyChapters(asset); } @catch (NSException *e) { SFLog(@"[chap] loi: %@", e); }
     @try {
         if (sf_heldToast && ((t < sf_heldStart - 0.5 && !SFRecentPress()) || t >= sf_heldEnd)) SFHideHeldToast();   // roi khoi doan -> bo nut skip dang giu
         SFReshowTick(self, t, asset);
+        SFEnsureToast(self, t, asset);
     } @catch (NSException *e) { SFLog(@"[chap] loi reshow: %@", e); }
     sf_orig_skip(self, _cmd, t, asset);
 }

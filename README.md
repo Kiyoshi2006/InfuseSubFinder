@@ -109,3 +109,4 @@ Dylib đọc **chương (chapter) trong file video** và đổi thành đoạn I
 - v0.36: don code thua (day toast len, quet toast), them log [handle] de tim ly do Prologue dau tap khong hien Skip.
 - v0.37: chi nhay tiep doan khi nguoi dung THAT SU bam Skip (hook INFPIntroController seekToTime:), het tu bo qua Opening khi Prologue dinh lien Opening.
 - v0.38: don logic skip: sau khi bam Skip 10s khong xoa dau/khong tat toast doan ke tiep, nhay tiep neu player lui vao doan; chan toast trung ke ca khi toast chua len man hinh.
+- v0.39: "Skip Alert: giu den het doan" tu hien lai nut skip neu dang trong doan Ask ma nut khong con tren man hinh (toi da 3 lan/doan), log [toast] bu nut.
