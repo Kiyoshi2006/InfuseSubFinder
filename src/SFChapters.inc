@@ -179,6 +179,7 @@ static float sf_askOverride = 0;
 static BOOL sf_inAsk = NO;
 static __weak id sf_heldToast;
 static double sf_heldStart, sf_heldEnd;
+static NSString *sf_heldSegId;
 static void (*sf_orig_toast)(id, SEL, id, double, id, id);
 // Toast skip hay de len tieu de/nut khi thanh dieu khien dang hien -> day toast len tren thanh tien trinh.
 static UIView *SFFindViewByClass(UIView *v, const char *cn, int depth) {
@@ -319,6 +320,15 @@ static void sf_hooked_handle(id self, SEL _cmd, id seg, double t) {
                     double end = SFD(seg, @"end");
                     if (end <= 0) { id h = sf_lastHelper; end = SFD(h, @"duration"); }
                     sf_askOverride = (float)MAX(2.0, end - t);
+                }
+                {   // da co toast Skip cho dung doan nay dang hien -> khong tao them (tranh 2 toast chong nhau)
+                    UIView *ht = sf_heldToast;
+                    NSString *sid = [NSString stringWithFormat:@"%@|%.2f", ident, SFD(seg, @"start")];
+                    if ([ht isKindOfClass:[UIView class]] && ht.window && [sf_heldSegId isEqualToString:sid]) {
+                        UIView *pill = SFFindPill(ht, 0);
+                        if (pill && SFViewReallyVisible(pill)) { sf_askOverride = 0; return; }
+                    }
+                    sf_heldSegId = sid;
                 }
                 sf_inAsk = YES;
                 sf_heldStart = SFD(seg, @"start");
