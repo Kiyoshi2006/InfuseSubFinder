@@ -444,6 +444,11 @@ static void sf_hooked_ph_skip(id self, SEL _cmd, double t) {
             sf_lastItem = mi0;
             if (sf_toastItem != mi0) SFHideHeldToast();   // toast vua tao cho chinh tap moi thi giu
             [sf_inside removeAllObjects]; sf_reshowReset = YES;
+            {   // tap moi: bo dau "da xu ly" cua tap truoc (uuid doan giong nhau giua cac tap nen nut Skip doan dau tap bi nuot mat)
+                id icN = SFObj0(self, @"introController");
+                NSMutableSet *skN = icN ? [icN valueForKey:@"_skippedSegments"] : nil;
+                if ([skN isKindOfClass:[NSMutableSet class]] && skN.count) { SFLog(@"[toast] tap moi: xoa %lu doan da danh dau", (unsigned long)skN.count); [skN removeAllObjects]; }
+            }
         }
         // nut (i) bat lai -> cho phep hien lai nut skip cua doan dang o trong
         Class UD1 = NSClassFromString(@"INFUserDefaults");
