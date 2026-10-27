@@ -204,14 +204,39 @@ static void SFReshowTick(id ctl, double t, id asset) {
     NSMutableSet *skipped = [ctl valueForKey:@"_skippedSegments"];
     if (![segs isKindOfClass:[NSArray class]] || ![skipped isKindOfClass:[NSMutableSet class]]) return;
     if (!sf_inside) sf_inside = [NSMutableSet set];
+    static NSMutableDictionary *outSince, *fixAt;
+    if (!outSince) { outSince = [NSMutableDictionary dictionary]; fixAt = [NSMutableDictionary dictionary]; }
+    NSDate *now = [NSDate date];
     for (id seg in segs) {
         NSString *uuid = SFStr0(seg, @"uuid");
         if (!uuid.length) continue;
         double st = SFD(seg, @"start");
         double en = ((double (*)(id, SEL, id))objc_msgSend)(ctl, NSSelectorFromString(@"effectiveEndForSegment:"), seg);
         BOOL inside = t >= st && t < en;
-        if (inside) [sf_inside addObject:uuid];
-        else if ([sf_inside containsObject:uuid]) { [sf_inside removeObject:uuid]; [skipped removeObject:uuid]; }
+        if (inside) {
+            NSDate *os = outSince[uuid];
+            if (os) {
+                // vua ra khoi doan roi quay lai ngay (< 1.5s) sau khi bam Skip: player bao thoi gian dich roi that ra lai ve keyframe truoc do
+                // -> khong xoa danh dau, va neu da bam skip thi nhay tiep qua het doan
+                if (-[os timeIntervalSinceNow] < 1.5 && [skipped containsObject:uuid]) {
+                    NSDate *fa = fixAt[uuid];
+                    id helper = sf_lastHelper;
+                    if (helper && (!fa || -[fa timeIntervalSinceNow] > 3.0)) {
+                        fixAt[uuid] = now;
+                        SFLog(@"[skip] player ve lai keyframe truoc het doan (t=%.1f, het doan %.1f) -> nhay tiep", t, en);
+                        ((void (*)(id, SEL, double))objc_msgSend)(helper, NSSelectorFromString(@"skipToTime:"), en + 0.1);
+                    }
+                }
+                [outSince removeObjectForKey:uuid];
+            }
+            [sf_inside addObject:uuid];
+        } else if ([sf_inside containsObject:uuid]) {
+            NSDate *os = outSince[uuid];
+            if (!os) outSince[uuid] = now;
+            else if (-[os timeIntervalSinceNow] >= 1.5) {       // ra ngoai on dinh -> cho phep hien lai khi tua lai
+                [sf_inside removeObject:uuid]; [skipped removeObject:uuid]; [outSince removeObjectForKey:uuid];
+            }
+        }
     }
 }
 
