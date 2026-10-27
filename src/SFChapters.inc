@@ -215,6 +215,7 @@ static void SFFixToastPos(void) {
 }
 static NSTimer *sf_toastFixTimer;
 static NSHashTable *sf_toasts;
+static __weak id sf_toastItem;
 static void SFKillOtherToasts(UIView *v, id keep, int depth) {
     if (!v || depth > 14) return;
     if (v != keep && strcmp(class_getName(object_getClass(v)), "ToastView") == 0 || (v != keep && [NSStringFromClass(object_getClass(v)) hasSuffix:@".ToastView"])) {
@@ -234,6 +235,7 @@ static void sf_hooked_toast(id self, SEL _cmd, id text, double dur, id title, id
         for (id o in sf_toasts.allObjects) if (o != self && [o respondsToSelector:NSSelectorFromString(@"hideImmediately")])
             ((void (*)(id, SEL))objc_msgSend)(o, NSSelectorFromString(@"hideImmediately"));
         [sf_toasts removeAllObjects]; [sf_toasts addObject:self];
+        sf_toastItem = SFObj0(sf_lastHelper, @"mediaItem");
         SFLog(@"[toast] hien: %@ (inAsk=%d)", text, (int)sf_inAsk);
     }
     if (sf_inAsk) {
@@ -244,7 +246,8 @@ static void sf_hooked_toast(id self, SEL _cmd, id text, double dur, id title, id
     }
 }
 static void SFHideHeldToast(void) {
-    id t = sf_heldToast; sf_heldToast = nil;
+    id t = sf_heldToast; sf_heldToast = nil; sf_heldSegId = nil;
+    if (t || sf_toasts.count) SFLog(@"[toast] tat (%lu cai)", (unsigned long)(sf_toasts.count ?: 1));
     NSMutableArray *all = [NSMutableArray arrayWithArray:sf_toasts.allObjects ?: @[]];
     if (t && ![all containsObject:t]) [all addObject:t];
     [sf_toasts removeAllObjects];
@@ -341,7 +344,7 @@ static void sf_hooked_handle(id self, SEL _cmd, id seg, double t) {
                     if ([ht isKindOfClass:[UIView class]] && ht.window && [sf_heldSegId isEqualToString:sid]) {
                         UIView *pill = SFFindPill(ht, 0);
                         BOOL fresh = sf_heldShownAt && -[sf_heldShownAt timeIntervalSinceNow] < 2.0;   // toast vua tao, chua kip hien (animation)
-                        if (fresh || (pill && SFViewReallyVisible(pill))) { sf_askOverride = 0; return; }
+                        if (fresh || (pill && SFViewReallyVisible(pill))) { sf_askOverride = 0; static int nb; if (nb++ < 6) SFLog(@"[toast] chan trung (%@)", sid); return; }
                     }
                     sf_heldSegId = sid; sf_heldShownAt = [NSDate date];
                 }
@@ -439,7 +442,7 @@ static void sf_hooked_ph_skip(id self, SEL _cmd, double t) {
         id mi0 = SFObj0(self, @"mediaItem");
         if (mi0 != sf_lastItem) {
             sf_lastItem = mi0;
-            SFHideHeldToast();
+            if (sf_toastItem != mi0) SFHideHeldToast();   // toast vua tao cho chinh tap moi thi giu
             [sf_inside removeAllObjects]; sf_reshowReset = YES;
         }
         // nut (i) bat lai -> cho phep hien lai nut skip cua doan dang o trong
