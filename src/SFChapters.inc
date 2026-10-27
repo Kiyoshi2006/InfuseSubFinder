@@ -225,13 +225,16 @@ static void SFHideHeldToast(void) {
 
 // Tua lai vao doan da di qua: xoa danh dau "da xu ly" khi thoi diem roi khoi doan -> lan vao lai se hien nut skip tiep.
 static NSMutableSet *sf_inside;
-// Ghi nho lan nguoi dung THAT SU bam Skip (InfusePlus goi controller seekToTime: voi het doan): chi khi do moi sua loi "ve lai keyframe"
+// Ghi nho lan nguoi dung THAT SU bam Skip (InfusePlus goi controller seekToTime: voi het doan).
+// Sau khi bam, player bao thoi gian dich roi vai giay sau co the lui ve keyframe truoc do: trong 10s do
+// khong xoa danh dau, khong tat nut skip cua doan ke tiep, va nhay tiep qua het doan neu player lui vao lai.
 static void (*sf_orig_seek)(id, SEL, double);
 static double sf_userSkipTo;
 static NSDate *sf_userSkipAt;
 static BOOL sf_selfSkip;
+static BOOL SFRecentPress(void) { return sf_userSkipAt && -[sf_userSkipAt timeIntervalSinceNow] < 10.0; }
 static void sf_hooked_seek(id self, SEL _cmd, double t) {
-    if (!sf_selfSkip) { sf_userSkipTo = t; sf_userSkipAt = [NSDate date]; }
+    if (!sf_selfSkip) { sf_userSkipTo = t; sf_userSkipAt = [NSDate date]; SFHideHeldToast(); }
     sf_orig_seek(self, _cmd, t);
 }
 static BOOL sf_reshowReset;
@@ -246,9 +249,10 @@ static void SFReshowTick(id ctl, double t, id asset) {
     NSMutableSet *skipped = [ctl valueForKey:@"_skippedSegments"];
     if (![segs isKindOfClass:[NSArray class]] || ![skipped isKindOfClass:[NSMutableSet class]]) return;
     if (!sf_inside) sf_inside = [NSMutableSet set];
-    static NSMutableDictionary *outSince, *fixAt;
-    if (!outSince) { outSince = [NSMutableDictionary dictionary]; fixAt = [NSMutableDictionary dictionary]; }
-    if (sf_reshowReset) { sf_reshowReset = NO; [outSince removeAllObjects]; [fixAt removeAllObjects]; [sf_inside removeAllObjects]; }
+    static NSMutableDictionary *outSince;
+    static NSDate *lastFix;
+    if (!outSince) outSince = [NSMutableDictionary dictionary];
+    if (sf_reshowReset) { sf_reshowReset = NO; [outSince removeAllObjects]; [sf_inside removeAllObjects]; }
     NSDate *now = [NSDate date];
     for (id seg in segs) {
         NSString *uuid = SFStr0(seg, @"uuid");
@@ -256,27 +260,18 @@ static void SFReshowTick(id ctl, double t, id asset) {
         double st = SFD(seg, @"start");
         double en = ((double (*)(id, SEL, id))objc_msgSend)(ctl, NSSelectorFromString(@"effectiveEndForSegment:"), seg);
         BOOL inside = t >= st && t < en;
+        BOOL pressedHere = SFRecentPress() && fabs(sf_userSkipTo - en) < 0.5;     // doan nguoi dung vua bam Skip
         if (inside) {
-            NSDate *os = outSince[uuid];
-            if (os) {
-                // vua ra khoi doan roi quay lai ngay (< 1.5s) sau khi bam Skip: player bao thoi gian dich roi that ra lai ve keyframe truoc do
-                // -> khong xoa danh dau, va neu da bam skip thi nhay tiep qua het doan
-                BOOL pressed = sf_userSkipAt && -[sf_userSkipAt timeIntervalSinceNow] < 6.0 && fabs(sf_userSkipTo - en) < 0.5;   // chi doan nguoi dung vua bam Skip
-                if (pressed && -[os timeIntervalSinceNow] < 1.5 && [skipped containsObject:uuid]) {
-                    NSDate *fa = fixAt[uuid];
-                    id helper = sf_lastHelper;
-                    if (helper && (!fa || -[fa timeIntervalSinceNow] > 3.0)) {
-                        fixAt[uuid] = now;
-                        SFLog(@"[skip] player ve lai keyframe truoc het doan (%@ t=%.1f, het doan %.1f) -> nhay tiep", SFStr0(seg, @"identifier"), t, en);
-                        sf_selfSkip = YES;
-                        ((void (*)(id, SEL, double))objc_msgSend)(helper, NSSelectorFromString(@"skipToTime:"), en + 0.1);
-                        sf_selfSkip = NO;
-                    }
-                }
-                [outSince removeObjectForKey:uuid];
+            [outSince removeObjectForKey:uuid];
+            if (pressedHere && [skipped containsObject:uuid] && t < en - 0.3 && (!lastFix || -[lastFix timeIntervalSinceNow] > 3.0)) {
+                lastFix = now;
+                SFLog(@"[skip] player lui vao doan vua skip (%@ t=%.1f, het doan %.1f) -> nhay tiep", SFStr0(seg, @"identifier"), t, en);
+                sf_selfSkip = YES;
+                ((void (*)(id, SEL, double))objc_msgSend)(sf_lastHelper, NSSelectorFromString(@"skipToTime:"), en + 0.3);
+                sf_selfSkip = NO;
             }
             [sf_inside addObject:uuid];
-        } else if ([sf_inside containsObject:uuid]) {
+        } else if ([sf_inside containsObject:uuid] && !pressedHere) {
             NSDate *os = outSince[uuid];
             if (!os) outSince[uuid] = now;
             else if (-[os timeIntervalSinceNow] >= 1.5) {       // ra ngoai on dinh -> cho phep hien lai khi tua lai
@@ -289,7 +284,7 @@ static void SFReshowTick(id ctl, double t, id asset) {
 static void sf_hooked_skip(id self, SEL _cmd, double t, id asset) {
     @try { SFApplyChapters(asset); } @catch (NSException *e) { SFLog(@"[chap] loi: %@", e); }
     @try {
-        if (sf_heldToast && (t < sf_heldStart - 0.5 || t >= sf_heldEnd)) SFHideHeldToast();   // roi khoi doan -> bo nut skip dang giu
+        if (sf_heldToast && ((t < sf_heldStart - 0.5 && !SFRecentPress()) || t >= sf_heldEnd)) SFHideHeldToast();   // roi khoi doan -> bo nut skip dang giu
         SFReshowTick(self, t, asset);
     } @catch (NSException *e) { SFLog(@"[chap] loi reshow: %@", e); }
     sf_orig_skip(self, _cmd, t, asset);
@@ -321,10 +316,10 @@ static void sf_hooked_handle(id self, SEL _cmd, id seg, double t) {
                 {   // da co toast Skip cho dung doan nay dang hien -> khong tao them (tranh 2 toast chong nhau)
                     UIView *ht = sf_heldToast;
                     NSString *sid = [NSString stringWithFormat:@"%@|%.2f", ident, SFD(seg, @"start")];
-                    if ([ht isKindOfClass:[UIView class]] && ht.window && [sf_heldSegId isEqualToString:sid]) {
-                        UIView *pill = SFFindPill(ht, 0);
-                        BOOL fresh = sf_heldShownAt && -[sf_heldShownAt timeIntervalSinceNow] < 2.0;   // toast vua tao, chua kip hien (animation)
-                        if (fresh || (pill && SFViewReallyVisible(pill))) { sf_askOverride = 0; static int nb; if (nb++ < 6) SFLog(@"[toast] chan trung (%@)", sid); return; }
+                    if (ht && [sf_heldSegId isEqualToString:sid]) {
+                        BOOL fresh = sf_heldShownAt && -[sf_heldShownAt timeIntervalSinceNow] < 2.0;   // toast vua tao, chua kip len man hinh
+                        UIView *pill = [ht isKindOfClass:[UIView class]] ? SFFindPill(ht, 0) : nil;
+                        if (fresh || (pill && SFViewReallyVisible(pill))) { sf_askOverride = 0; return; }
                     }
                     sf_heldSegId = sid; sf_heldShownAt = [NSDate date];
                 }
