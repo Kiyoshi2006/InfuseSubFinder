@@ -107,3 +107,4 @@ Dylib đọc **chương (chapter) trong file video** và đổi thành đoạn I
 - v0.34: khong tat toast Skip vua tao cho tap moi (loi mat nut skip luc dau tap); them log [toast].
 - v0.35: doi tap thi xoa _skippedSegments cua tap truoc (sua mat nut Skip Prologue/Recap dau tap).
 - v0.36: don code thua (day toast len, quet toast), them log [handle] de tim ly do Prologue dau tap khong hien Skip.
+- v0.37: chi nhay tiep doan khi nguoi dung THAT SU bam Skip (hook INFPIntroController seekToTime:), het tu bo qua Opening khi Prologue dinh lien Opening.

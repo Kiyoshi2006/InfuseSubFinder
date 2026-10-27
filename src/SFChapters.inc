@@ -182,13 +182,7 @@ static double sf_heldStart, sf_heldEnd;
 static NSString *sf_heldSegId;
 static NSDate *sf_heldShownAt;
 static void (*sf_orig_toast)(id, SEL, id, double, id, id);
-// Toast skip hay de len tieu de/nut khi thanh dieu khien dang hien -> day toast len tren thanh tien trinh.
-static UIView *SFFindViewByClass(UIView *v, const char *cn, int depth) {
-    if (!v || depth > 14) return nil;
-    if (strcmp(class_getName(object_getClass(v)), cn) == 0) return v;
-    for (UIView *s in v.subviews) { UIView *r = SFFindViewByClass(s, cn, depth + 1); if (r) return r; }
-    return nil;
-}
+// Tim "vien thuoc" cua toast + kiem tra dang hien that (dung de chan toast Skip trung)
 static UIView *SFFindPill(UIView *v, int depth) {
     if (!v || depth > 6) return nil;
     if (v.layer.cornerRadius >= 12 && v.bounds.size.height < 150 && v.bounds.size.width > 120) return v;
@@ -199,31 +193,8 @@ static BOOL SFViewReallyVisible(UIView *v) {
     for (UIView *p = v; p; p = p.superview) if (p.hidden || p.alpha < 0.05) return NO;
     return v.window != nil;
 }
-static void SFFixToastPos(void) {
-    UIView *t = sf_heldToast;
-    if (![t isKindOfClass:[UIView class]] || !t.window) return;
-    UIView *bar = SFFindViewByClass(t.window, "FCProgressBarCacheLineView", 0);
-    if (!bar || !SFViewReallyVisible(bar)) { if (!CGAffineTransformIsIdentity(t.transform)) t.transform = CGAffineTransformIdentity; return; }
-    UIView *pill = t.bounds.size.height < 150 ? t : (SFFindPill(t, 0) ?: t);
-    CGAffineTransform keep = t.transform; t.transform = CGAffineTransformIdentity;
-    CGRect pr = [pill convertRect:pill.bounds toView:t.window];
-    CGRect br = [bar convertRect:bar.bounds toView:t.window];
-    CGFloat limit = br.origin.y - 72;            // chua cho cho tieu de 2 dong + hang nut
-    CGFloat over = CGRectGetMaxY(pr) - limit;
-    t.transform = over > 1 ? CGAffineTransformMakeTranslation(0, -over) : CGAffineTransformIdentity;
-    (void)keep;
-}
-static NSTimer *sf_toastFixTimer;
 static NSHashTable *sf_toasts;
-static void SFKillOtherToasts(UIView *v, id keep, int depth) {
-    if (!v || depth > 14) return;
-    if (v != keep && strcmp(class_getName(object_getClass(v)), "ToastView") == 0 || (v != keep && [NSStringFromClass(object_getClass(v)) hasSuffix:@".ToastView"])) {
-        SEL h = NSSelectorFromString(@"hideImmediately");
-        if ([v respondsToSelector:h]) ((void (*)(id, SEL))objc_msgSend)(v, h);
-        return;
-    }
-    for (UIView *s in [v.subviews copy]) SFKillOtherToasts(s, keep, depth + 1);
-}
+static __weak id sf_toastItem;
 static void sf_hooked_toast(id self, SEL _cmd, id text, double dur, id title, id block) {
     id old = sf_heldToast;
     if (sf_inAsk && old && old != self && [old respondsToSelector:NSSelectorFromString(@"hideImmediately")])
@@ -234,17 +205,16 @@ static void sf_hooked_toast(id self, SEL _cmd, id text, double dur, id title, id
         for (id o in sf_toasts.allObjects) if (o != self && [o respondsToSelector:NSSelectorFromString(@"hideImmediately")])
             ((void (*)(id, SEL))objc_msgSend)(o, NSSelectorFromString(@"hideImmediately"));
         [sf_toasts removeAllObjects]; [sf_toasts addObject:self];
+        sf_toastItem = SFObj0(sf_lastHelper, @"mediaItem");
         SFLog(@"[toast] hien: %@ (inAsk=%d)", text, (int)sf_inAsk);
     }
     if (sf_inAsk) {
         sf_heldToast = self;
-        UIView *tv = [self isKindOfClass:[UIView class]] ? self : nil;
-        UIWindow *w = tv.window;
-        dispatch_async(dispatch_get_main_queue(), ^{ if (w) SFKillOtherToasts(w, self, 0); });
     }
 }
 static void SFHideHeldToast(void) {
-    id t = sf_heldToast; sf_heldToast = nil;
+    id t = sf_heldToast; sf_heldToast = nil; sf_heldSegId = nil;
+    if (t || sf_toasts.count) SFLog(@"[toast] tat (%lu cai)", (unsigned long)(sf_toasts.count ?: 1));
     NSMutableArray *all = [NSMutableArray arrayWithArray:sf_toasts.allObjects ?: @[]];
     if (t && ![all containsObject:t]) [all addObject:t];
     [sf_toasts removeAllObjects];
@@ -255,6 +225,15 @@ static void SFHideHeldToast(void) {
 
 // Tua lai vao doan da di qua: xoa danh dau "da xu ly" khi thoi diem roi khoi doan -> lan vao lai se hien nut skip tiep.
 static NSMutableSet *sf_inside;
+// Ghi nho lan nguoi dung THAT SU bam Skip (InfusePlus goi controller seekToTime: voi het doan): chi khi do moi sua loi "ve lai keyframe"
+static void (*sf_orig_seek)(id, SEL, double);
+static double sf_userSkipTo;
+static NSDate *sf_userSkipAt;
+static BOOL sf_selfSkip;
+static void sf_hooked_seek(id self, SEL _cmd, double t) {
+    if (!sf_selfSkip) { sf_userSkipTo = t; sf_userSkipAt = [NSDate date]; }
+    sf_orig_seek(self, _cmd, t);
+}
 static BOOL sf_reshowReset;
 static __weak id sf_lastItem;
 static BOOL sf_lastOn = YES;
@@ -282,13 +261,16 @@ static void SFReshowTick(id ctl, double t, id asset) {
             if (os) {
                 // vua ra khoi doan roi quay lai ngay (< 1.5s) sau khi bam Skip: player bao thoi gian dich roi that ra lai ve keyframe truoc do
                 // -> khong xoa danh dau, va neu da bam skip thi nhay tiep qua het doan
-                if (-[os timeIntervalSinceNow] < 1.5 && [skipped containsObject:uuid]) {
+                BOOL pressed = sf_userSkipAt && -[sf_userSkipAt timeIntervalSinceNow] < 6.0 && fabs(sf_userSkipTo - en) < 0.5;   // chi doan nguoi dung vua bam Skip
+                if (pressed && -[os timeIntervalSinceNow] < 1.5 && [skipped containsObject:uuid]) {
                     NSDate *fa = fixAt[uuid];
                     id helper = sf_lastHelper;
                     if (helper && (!fa || -[fa timeIntervalSinceNow] > 3.0)) {
                         fixAt[uuid] = now;
                         SFLog(@"[skip] player ve lai keyframe truoc het doan (%@ t=%.1f, het doan %.1f) -> nhay tiep", SFStr0(seg, @"identifier"), t, en);
+                        sf_selfSkip = YES;
                         ((void (*)(id, SEL, double))objc_msgSend)(helper, NSSelectorFromString(@"skipToTime:"), en + 0.1);
+                        sf_selfSkip = NO;
                     }
                 }
                 [outSince removeObjectForKey:uuid];
@@ -328,6 +310,7 @@ static void sf_hooked_handle(id self, SEL _cmd, id seg, double t) {
         NSString *ident = SFStr0(seg, @"identifier");
         if (UD && ident.length) {
             long mode = ((long (*)(id, SEL, id))objc_msgSend)(UD, NSSelectorFromString(@"intForKey:"), ident);
+            { static int nh; if (nh++ < 60) SFLog(@"[handle] %@ che do=%ld t=%.1f doan=%.1f-%.1f", ident, mode, t, SFD(seg, @"start"), SFD(seg, @"end")); }
             if (mode == 2) { ((void (*)(id, SEL, id))objc_msgSend)(self, NSSelectorFromString(@"autoSkip:"), seg); return; }
             if (mode == 3) {
                 if (sf_orig_floatForKey && [[NSUserDefaults standardUserDefaults] boolForKey:@"sf.skipinf"]) {
@@ -341,7 +324,7 @@ static void sf_hooked_handle(id self, SEL _cmd, id seg, double t) {
                     if ([ht isKindOfClass:[UIView class]] && ht.window && [sf_heldSegId isEqualToString:sid]) {
                         UIView *pill = SFFindPill(ht, 0);
                         BOOL fresh = sf_heldShownAt && -[sf_heldShownAt timeIntervalSinceNow] < 2.0;   // toast vua tao, chua kip hien (animation)
-                        if (fresh || (pill && SFViewReallyVisible(pill))) { sf_askOverride = 0; return; }
+                        if (fresh || (pill && SFViewReallyVisible(pill))) { sf_askOverride = 0; static int nb; if (nb++ < 6) SFLog(@"[toast] chan trung (%@)", sid); return; }
                     }
                     sf_heldSegId = sid; sf_heldShownAt = [NSDate date];
                 }
@@ -439,8 +422,13 @@ static void sf_hooked_ph_skip(id self, SEL _cmd, double t) {
         id mi0 = SFObj0(self, @"mediaItem");
         if (mi0 != sf_lastItem) {
             sf_lastItem = mi0;
-            SFHideHeldToast();
+            if (sf_toastItem != mi0) SFHideHeldToast();   // toast vua tao cho chinh tap moi thi giu
             [sf_inside removeAllObjects]; sf_reshowReset = YES;
+            {   // tap moi: bo dau "da xu ly" cua tap truoc (uuid doan giong nhau giua cac tap nen nut Skip doan dau tap bi nuot mat)
+                id icN = SFObj0(self, @"introController");
+                NSMutableSet *skN = icN ? [icN valueForKey:@"_skippedSegments"] : nil;
+                if ([skN isKindOfClass:[NSMutableSet class]] && skN.count) { SFLog(@"[toast] tap moi: xoa %lu doan da danh dau", (unsigned long)skN.count); [skN removeAllObjects]; }
+            }
         }
         // nut (i) bat lai -> cho phep hien lai nut skip cua doan dang o trong
         Class UD1 = NSClassFromString(@"INFUserDefaults");
@@ -705,6 +693,8 @@ static BOOL SFTryInstallChapters(void) {
             sf_orig_handle = (void (*)(id, SEL, id, double))method_getImplementation(mh); method_setImplementation(mh, (IMP)sf_hooked_handle);
             Class UD = NSClassFromString(@"INFUserDefaults");
             Method mf = UD ? class_getClassMethod(UD, NSSelectorFromString(@"floatForKey:")) : NULL;
+            Method msk = class_getInstanceMethod(c, NSSelectorFromString(@"seekToTime:"));
+            if (msk) { sf_orig_seek = (void (*)(id, SEL, double))method_getImplementation(msk); method_setImplementation(msk, (IMP)sf_hooked_seek); }
             if (mf) { sf_orig_floatForKey = (float (*)(id, SEL, id))method_getImplementation(mf); method_setImplementation(mf, (IMP)sf_hooked_floatForKey); }
             Class TV = NSClassFromString(@"ToastView");
             Method mt = TV ? class_getInstanceMethod(TV, NSSelectorFromString(@"showProgressiveToastWithText:duration:actionTitle:actionCompletion:")) : NULL;
